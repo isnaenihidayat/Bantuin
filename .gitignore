@@ -1,0 +1,38 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Runtime data
+data/
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+logs/
+backups/
+
+# IDE and operating system
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test artifacts
+test-results/
+playwright-report/
+.cache/
+
+# Local tooling
+.turbo/
+.bun/
+tmp/
