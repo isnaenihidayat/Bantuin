@@ -1,0 +1,11 @@
+{
+  "name": "@bantuin/providers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@bantuin/core": "workspace:*",
+    "@openrouter/sdk": "^0.12.79"
+  }
+}

@@ -2,7 +2,7 @@
 
 Date: 21-06-26  
 Complexity: Complex phase 1/6  
-Status: ⏳ PLANNED  
+Status: ✅ VERIFIED
 Objective: prove the stack, initialize the target repository safely, and establish contracts, migrations, CI, and deployment skeleton.
 
 ## Context
@@ -81,16 +81,16 @@ The architecture and delivery path are viable enough to build product behavior w
 
 ## Implementation Checklist
 
-- [ ] Complete research gate and receive approval
-- [ ] Initialize Git/remote policy without pushing secrets
-- [ ] Scaffold workspace boundaries and quality scripts
-- [ ] Add contracts and mock provider with tests
-- [ ] Add migrations/repositories with idempotency tests
-- [ ] Add health/readiness integration test
-- [ ] Build Docker and CI/secret scan paths
-- [ ] Run manual clean-clone proof and record evidence
-- [ ] Receive user confirmation
-- [ ] Commit atomically and push `feat/sprint-1-foundation`
+- [x] Complete research gate and receive approval
+- [x] Initialize Git/remote policy without pushing secrets
+- [x] Scaffold workspace boundaries and quality scripts
+- [x] Add contracts and mock provider with tests
+- [x] Add migrations/repositories with idempotency tests
+- [x] Add health/readiness integration test
+- [x] Build Docker and CI/secret scan paths
+- [x] Run manual clean-clone proof and record evidence
+- [x] Receive user confirmation
+- [x] Commit atomically and push `feat/sprint-1-foundation`
 
 ## Resume and Execution Handoff
 

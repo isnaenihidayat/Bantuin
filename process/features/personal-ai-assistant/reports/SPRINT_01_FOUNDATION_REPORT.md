@@ -1,12 +1,25 @@
 # Sprint 01 Foundation Report
 
-Date: 21-06-26  
-Sprint status: ⏳ PLANNED — Pre-Sprint Research Complete, awaiting approval  
-Execution status: No application scaffold, Git initialization, dependency installation, commit, or push performed.
+Date: 22-06-26
+Sprint status: ✅ VERIFIED
+Execution status: Foundation implemented, verified, committed, and pushed on `feat/sprint-1-foundation`.
 
 ## What's Functional Now
 
-Only planning and research artifacts exist. The local runtime and SQLite capability have been proven, but Bantuin application code has not started.
+The bootstrap `main` commit is live on GitHub. The feature branch now contains a runnable API with health/readiness, OpenAPI output, SQLite migrations, provider-neutral agent contracts, an isolated OpenRouter adapter, deterministic mock streaming, quality scripts, CI, and a production bundle.
+
+## Implementation Summary
+
+- Bootstrap commit `c9afa7a` pushed to `origin/main`.
+- Bun workspace boundaries: `apps/api` and `packages/{core,agent,providers,db,client}`.
+- OpenRouter SDK `0.12.79` isolated inside `packages/providers`; tests never make a live paid request.
+- Ordered migration `0001_initial.sql` with checksum and double-run idempotency.
+- Minimal `owners`, `profiles`, and `chat_sessions` repositories.
+- Hono/OpenAPI `/health`, `/ready`, `/openapi.json`, and internal mock-stream vertical slice.
+- Stable error envelope and request IDs.
+- Biome, strict TypeScript, dependency-boundary check, custom secret scan, Bun tests, and bundle build.
+- GitHub Actions quality/container jobs and non-root multi-stage Dockerfile.
+- Repository context and test-command maps under `process/context/`.
 
 ## Research Scope
 
@@ -29,7 +42,7 @@ Only planning and research artifacts exist. The local runtime and SQLite capabil
 | GitHub CLI | Not installed | PR/repo automation cannot rely on `gh` initially |
 | Bantuin remote | Reachable but returns no HEAD | Repository is empty |
 | Docker client | `29.4.0` | Client installed |
-| Docker daemon | Unavailable at current OrbStack socket | Docker build/smoke verification is blocked until daemon starts |
+| Docker daemon | `29.4.0`, Linux ARM64 via OrbStack | Image build and inspection completed |
 | Host | macOS ARM64 | Container and native dependencies must support arm64 |
 
 ## OpenRouter Contract Findings
@@ -64,7 +77,7 @@ Official references:
 | Tests | Mock provider by default; live OpenRouter smoke is explicit/opt-in | CI remains deterministic and secret-free |
 | Secrets | `OPENROUTER_API_KEY` from process environment; `.env.local` ignored; never persist in DB/client/logs | Smallest safe Sprint 1 surface |
 | Network | Bind API to `127.0.0.1` by default | No accidental LAN/internet exposure |
-| Docker | Multi-stage image later in Sprint 1; no success claim until daemon test passes | Client alone is insufficient proof |
+| Docker | Non-root multi-stage Bun image | Build passed; image digest recorded below |
 | Source reuse | Adapt concepts; copy no TinyClaw application code in Sprint 1 | Avoid imported complexity and attribution ambiguity |
 | License | MIT recommended | Matches the public/open-source posture and reference compatibility |
 
@@ -93,13 +106,16 @@ Because the remote has no HEAD, the recommended workflow is:
 
 Write authentication remains unverified until the first approved push. No force push will be used.
 
-## Blockers Before Implementation
+## Git Checkpoint
 
-1. User approval of this decision set.
-2. User approval of MIT licensing, or selection of another license posture.
-3. User approval of the one-time bootstrap commit/push to empty `main`.
+- Foundation commit: `deed8e3` (`feat: establish personal assistant foundation`).
+- Branch: [feat/sprint-1-foundation](https://github.com/isnaenihidayat/Bantuin/tree/feat/sprint-1-foundation).
+- User confirmation: foundation, MIT license, bootstrap `main`, and continuation of Sprint 1 approved.
+- Push completed without force.
 
-Docker daemon availability is required before Sprint 1 can become ✅ VERIFIED, but it does not block initial scaffolding after approval.
+## Remaining Remote Gate
+
+GitHub Actions starts on `main` pushes or pull requests, so its remote run belongs to the later PR/merge gate. Local commands matching CI are green.
 
 ## What Was Tested
 
@@ -108,13 +124,21 @@ Docker daemon availability is required before Sprint 1 can become ✅ VERIFIED, 
 - Read-only remote HEAD lookup.
 - Read-only Git identity and credential-helper inspection.
 - Official OpenRouter documentation review.
+- `bun run check`: format, lint, strict types, package boundaries, secret scan, 18 tests, and production bundle all pass.
+- Clean-copy `bun install --frozen-lockfile` and `bun run check` pass.
+- Docker image `bantuin:sprint1` built successfully as `sha256:1c23b7b8ec6a28ced582178afe2c8223becea4ebc3441071f69a94a012268cdf` for ARM64 with non-root user `bantuin`.
+- Source API smoke: `/health` 200, `/ready` 200, and mock SSE stream completed.
+- Production bundle smoke: `dist/api/index.js` started and `/ready` returned 200.
+- SQLite state: migration version `1`, name `initial`, 64-character checksum; expected four tables exist.
+- Failure behavior: invalid request returns 400; closed database returns readiness 503; mock provider cancellation rejects cleanly.
+- Ignore policy: `.env`, `.env.local`, SQLite data, logs, and backups are ignored by Git.
 
 ## What You Can Test
 
-- Start OrbStack or Docker Desktop, then run `docker info`.
-- Confirm that `https://github.com/isnaenihidayat/Bantuin` is intentionally empty.
-- Confirm whether the project should use MIT licensing.
+- Run `bun install --frozen-lockfile && bun run check`.
+- Run `bun start`, then request `/health`, `/ready`, and `/openapi.json`.
+- Build the image with `docker build -t bantuin:sprint1 .`.
 
 ## Ready For
 
-After explicit approval: Sprint 1 implementation stages 1–6, beginning with Git bootstrap and workspace scaffolding. The next checkpoint occurs before the first remote push.
+Begin Sprint 02 research from the verified foundation. Open a pull request when remote CI and review are desired.
