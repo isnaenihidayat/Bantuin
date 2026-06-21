@@ -201,7 +201,7 @@ Every user-owned row has `owner_id`; messages have `(session_id, sequence)` uniq
 
 | Sprint | Dates | Status | Direct plan | Report |
 | --- | --- | --- | --- | --- |
-| 1 | Weeks 1–2 | ⏳ PLANNED | `SPRINT_01_FOUNDATION_PLAN_21-06-26.md` | `reports/SPRINT_01_FOUNDATION_REPORT.md` |
+| 1 | Weeks 1–2 | 🔨 CODE DONE | `SPRINT_01_FOUNDATION_PLAN_21-06-26.md` | `reports/SPRINT_01_FOUNDATION_REPORT.md` |
 | 2 | Weeks 3–4 | ⏳ PLANNED | `SPRINT_02_CORE_CHAT_PLAN_21-06-26.md` | `reports/SPRINT_02_CORE_CHAT_REPORT.md` |
 | 3 | Weeks 5–6 | ⏳ PLANNED | `SPRINT_03_MEMORY_PLAN_21-06-26.md` | `reports/SPRINT_03_MEMORY_REPORT.md` |
 | 4 | Weeks 7–8 | ⏳ PLANNED | `SPRINT_04_TOOLS_AUTOMATIONS_PLAN_21-06-26.md` | `reports/SPRINT_04_TOOLS_AUTOMATIONS_REPORT.md` |

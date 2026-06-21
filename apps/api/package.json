@@ -1,0 +1,16 @@
+{
+  "name": "@bantuin/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bantuin/agent": "workspace:*",
+    "@bantuin/client": "workspace:*",
+    "@bantuin/core": "workspace:*",
+    "@bantuin/db": "workspace:*",
+    "@bantuin/providers": "workspace:*",
+    "@hono/zod-openapi": "^1.1.5",
+    "hono": "^4.10.7",
+    "zod": "^4.1.13"
+  }
+}

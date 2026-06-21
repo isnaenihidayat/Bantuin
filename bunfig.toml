@@ -1,0 +1,6 @@
+[test]
+root = "."
+coverage = false
+
+[loader]
+".sql" = "text"
