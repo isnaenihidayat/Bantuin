@@ -9,6 +9,7 @@ import {
 } from "@bantuin/core";
 import {
   AuthRepository,
+  AttachmentRepository,
   chunkKnowledgeText,
   checkDatabase,
   type BantuinDatabase,
@@ -38,6 +39,8 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 const LOGIN_WINDOW_MS = 5 * 60 * 1_000;
 const LOGIN_MAX_FAILURES = 5;
 const KNOWLEDGE_MAX_BYTES = 1024 * 1024;
+const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+const ATTACHMENT_MAX_COUNT = 5;
 const memoryTypes = ["preference", "fact", "goal", "note"] as const;
 const memoryStatuses = ["active", "archived"] as const;
 
@@ -104,6 +107,7 @@ export function createApp(dependencies: AppDependencies) {
   const messageRepository = new MessageRepository(dependencies.database);
   const memories = new MemoryRepository(dependencies.database);
   const knowledge = new KnowledgeRepository(dependencies.database);
+  const attachments = new AttachmentRepository(dependencies.database);
   const activeStreams = new Map<string, AbortController>();
   // ponytail: single-process limiter; move to shared storage before horizontal deployment.
   const loginFailures = new Map<string, { count: number; resetAt: number }>();
@@ -156,8 +160,33 @@ export function createApp(dependencies: AppDependencies) {
       }));
   }
 
+  function publicAttachments(messageId: string) {
+    return attachments.list(messageId).map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      filename: item.filename,
+      mediaType: item.mediaType,
+      bytes: item.bytes,
+      data: Buffer.from(item.content).toString("base64"),
+    }));
+  }
+
   function checkpointDeletedContent(): void {
     dependencies.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
+  function validateProfileModel(model: string | null): void {
+    const configured =
+      dependencies.config.provider.kind === "openrouter"
+        ? dependencies.config.provider.model
+        : "mock";
+    if (model && model !== configured) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Model is not available from the configured provider",
+        status: 400,
+      });
+    }
   }
 
   function streamAssistant(
@@ -194,13 +223,37 @@ export function createApp(dependencies: AppDependencies) {
             return;
           }
 
-          const profile = profiles.findByOwnerId(owner.id);
+          const session = sessions.findByIdForOwner(assistant.sessionId, owner.id);
+          const profile = session ? profiles.findByIdForOwner(session.profileId, owner.id) : null;
+          if (!session || !profile || profile.archivedAt) {
+            throw new AppError({
+              code: "VALIDATION_FAILED",
+              message: "Session profile is unavailable",
+              status: 409,
+            });
+          }
           const history = messageRepository
             .list(assistant.sessionId)
             .filter((message) => message.id !== assistant.id && message.status === "completed")
-            .map((message) => ({ role: message.role, content: message.content }));
+            .map((message) => {
+              const messageAttachments = attachments.list(message.id);
+              if (message.role !== "user" || !messageAttachments.length) {
+                return { role: message.role, content: message.content };
+              }
+              const documentText = messageAttachments
+                .filter((item) => item.kind === "document")
+                .map(
+                  (item) =>
+                    `\n\n[${item.filename ?? "dokumen"}]\n${new TextDecoder().decode(item.content)}`,
+                )
+                .join("");
+              return {
+                role: message.role,
+                content: `${message.content}${documentText}`,
+              };
+            });
           const query = history.findLast((message) => message.role === "user")?.content ?? "";
-          const foundSources = knowledge.search(owner.id, query, 5);
+          const foundSources = knowledge.search(owner.id, profile.id, query, 5);
           const contextWindowTokens = await dependencies.agent.contextWindowTokens();
           const assembled = assembleContext({
             contextWindowTokens,
@@ -209,6 +262,20 @@ export function createApp(dependencies: AppDependencies) {
             sources: foundSources,
             history,
           });
+          const latestUser = assembled.messages.findLast((message) => message.role === "user");
+          const latestStoredUser = messageRepository
+            .list(assistant.sessionId)
+            .filter((message) => message.role === "user" && message.status === "completed")
+            .at(-1);
+          const imageAttachments = latestStoredUser
+            ? attachments.list(latestStoredUser.id).filter((item) => item.kind === "image")
+            : [];
+          if (latestUser && imageAttachments.length) {
+            latestUser.images = imageAttachments.map((item) => ({
+              mediaType: item.mediaType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+              data: Buffer.from(item.content).toString("base64"),
+            }));
+          }
           const selectedSources = foundSources.filter((source) =>
             assembled.sources.some((selected) => selected.chunkId === source.chunkId),
           );
@@ -229,6 +296,7 @@ export function createApp(dependencies: AppDependencies) {
             {
               requestId,
               messages: assembled.messages,
+              ...(profile.providerModel ? { model: profile.providerModel } : {}),
               maxTokens: Math.min(2_048, Math.floor(contextWindowTokens / 4)),
             },
             { signal: providerSignal },
@@ -506,10 +574,79 @@ export function createApp(dependencies: AppDependencies) {
       .object({
         name: z.string().trim().min(1).max(80).default(current.name),
         systemPrompt: z.string().trim().max(8_000).default(current.systemPrompt),
+        providerModel: z.string().trim().min(1).max(180).nullable().default(current.providerModel),
       })
       .parse(await context.req.json());
-    profiles.update(owner.id, { ...input, updatedAt: new Date().toISOString() });
+    validateProfileModel(input.providerModel);
+    profiles.update(current.id, owner.id, { ...input, updatedAt: new Date().toISOString() });
     return context.json({ profile: profiles.findByOwnerId(owner.id) });
+  });
+
+  app.get("/v1/profiles", (context) => {
+    const owner = currentOwner(context);
+    return context.json({ profiles: profiles.list(owner.id) });
+  });
+
+  app.post("/v1/profiles", async (context) => {
+    const owner = currentOwner(context);
+    const input = z
+      .object({
+        name: z.string().trim().min(1).max(80),
+        systemPrompt: z.string().trim().max(8_000).default(""),
+        providerModel: z.string().trim().min(1).max(180).nullable().default(null),
+      })
+      .parse(await context.req.json());
+    validateProfileModel(input.providerModel);
+    const now = new Date().toISOString();
+    const profile = {
+      id: createId("profile"),
+      ownerId: owner.id,
+      ...input,
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    profiles.create(profile);
+    return context.json({ profile }, 201);
+  });
+
+  app.patch("/v1/profiles/:id", async (context) => {
+    const owner = currentOwner(context);
+    const current = profiles.findByIdForOwner(context.req.param("id"), owner.id);
+    if (!current || current.archivedAt) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
+    const input = z
+      .object({
+        name: z.string().trim().min(1).max(80).default(current.name),
+        systemPrompt: z.string().trim().max(8_000).default(current.systemPrompt),
+        providerModel: z.string().trim().min(1).max(180).nullable().default(current.providerModel),
+      })
+      .parse(await context.req.json());
+    validateProfileModel(input.providerModel);
+    profiles.update(current.id, owner.id, { ...input, updatedAt: new Date().toISOString() });
+    return context.json({ profile: profiles.findByIdForOwner(current.id, owner.id) });
+  });
+
+  app.delete("/v1/profiles/:id", (context) => {
+    const owner = currentOwner(context);
+    if (!profiles.archive(context.req.param("id"), owner.id, new Date().toISOString())) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Profile not found or it is the last active profile",
+        status: 409,
+      });
+    }
+    return context.body(null, 204);
+  });
+
+  app.get("/v1/models", (context) => {
+    currentOwner(context);
+    const model =
+      dependencies.config.provider.kind === "openrouter"
+        ? dependencies.config.provider.model
+        : "mock";
+    return context.json({ models: [{ id: model, name: model.split("/").at(-1) ?? model }] });
   });
 
   app.get("/v1/memories", (context) => {
@@ -583,18 +720,32 @@ export function createApp(dependencies: AppDependencies) {
 
   app.get("/v1/knowledge", (context) => {
     const owner = currentOwner(context);
-    const documents = knowledge.listDocuments(owner.id).map(({ content, ...document }) => ({
-      ...document,
-      bytes: new TextEncoder().encode(content).byteLength,
-    }));
+    const profileId = context.req.query("profileId") ?? profiles.findByOwnerId(owner.id)?.id;
+    if (!profileId || !profiles.findByIdForOwner(profileId, owner.id)) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
+    const documents = knowledge
+      .listDocuments(owner.id, profileId)
+      .map(({ content, ...document }) => ({
+        ...document,
+        bytes: new TextEncoder().encode(content).byteLength,
+      }));
     return context.json({ documents });
   });
 
   app.post("/v1/knowledge", async (context) => {
     const owner = currentOwner(context);
     const input = z
-      .object({ sourceName: z.string().trim().min(1).max(180), content: z.string().min(1) })
+      .object({
+        profileId: z.string().optional(),
+        sourceName: z.string().trim().min(1).max(180),
+        content: z.string().min(1),
+      })
       .parse(await context.req.json());
+    const profileId = input.profileId ?? profiles.findByOwnerId(owner.id)?.id;
+    if (!profileId || !profiles.findByIdForOwner(profileId, owner.id)) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
     if (
       input.sourceName.includes("/") ||
       input.sourceName.includes("\\") ||
@@ -629,6 +780,7 @@ export function createApp(dependencies: AppDependencies) {
     const document = {
       id: createId("document"),
       ownerId: owner.id,
+      profileId,
       sourceName: input.sourceName,
       mediaType: input.sourceName.toLowerCase().endsWith(".md")
         ? ("text/markdown" as const)
@@ -668,7 +820,8 @@ export function createApp(dependencies: AppDependencies) {
 
   app.delete("/v1/knowledge/:id", (context) => {
     const owner = currentOwner(context);
-    if (!knowledge.deleteDocument(context.req.param("id"), owner.id)) {
+    const profileId = context.req.query("profileId") ?? profiles.findByOwnerId(owner.id)?.id;
+    if (!profileId || !knowledge.deleteDocument(context.req.param("id"), owner.id, profileId)) {
       throw new AppError({
         code: "VALIDATION_FAILED",
         message: "Knowledge document not found",
@@ -686,6 +839,7 @@ export function createApp(dependencies: AppDependencies) {
       messages: messageRepository.list(session.id).map((message) => ({
         ...message,
         sources: publicSources(message.id),
+        attachments: publicAttachments(message.id),
       })),
     }));
     context.header("cache-control", "no-store");
@@ -696,7 +850,9 @@ export function createApp(dependencies: AppDependencies) {
       owner,
       profile: profiles.findByOwnerId(owner.id),
       memories: memories.list(owner.id),
-      knowledge: knowledge.listDocuments(owner.id),
+      knowledge: profiles
+        .list(owner.id, true)
+        .flatMap((profile) => knowledge.listDocuments(owner.id, profile.id)),
       sessions: exportedSessions,
     });
   });
@@ -708,13 +864,18 @@ export function createApp(dependencies: AppDependencies) {
 
   app.post("/v1/sessions", async (context) => {
     const owner = currentOwner(context);
-    const profile = profiles.findByOwnerId(owner.id);
+    const input = z
+      .object({
+        title: z.string().trim().min(1).max(120).nullable().default(null),
+        profileId: z.string().optional(),
+      })
+      .parse(await context.req.json());
+    const profile = input.profileId
+      ? profiles.findByIdForOwner(input.profileId, owner.id)
+      : profiles.findByOwnerId(owner.id);
     if (!profile) {
       throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
     }
-    const input = z
-      .object({ title: z.string().trim().min(1).max(120).nullable().default(null) })
-      .parse(await context.req.json());
     const now = new Date().toISOString();
     const session = {
       id: createId("session"),
@@ -722,11 +883,42 @@ export function createApp(dependencies: AppDependencies) {
       profileId: profile.id,
       channel: "web",
       title: input.title,
+      parentSessionId: null,
+      branchMessageId: null,
       createdAt: now,
       updatedAt: now,
     };
     sessions.create(session);
     return context.json({ session }, 201);
+  });
+
+  app.post("/v1/sessions/:id/branch", async (context) => {
+    const owner = currentOwner(context);
+    const source = sessions.findByIdForOwner(context.req.param("id"), owner.id);
+    if (!source) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Session not found", status: 404 });
+    }
+    const input = z.object({ messageId: z.string().min(1) }).parse(await context.req.json());
+    const now = new Date().toISOString();
+    const branch = {
+      id: createId("session"),
+      ownerId: owner.id,
+      profileId: source.profileId,
+      channel: source.channel,
+      title: source.title ? `${source.title} · cabang` : "Percakapan cabang",
+      parentSessionId: source.id,
+      branchMessageId: input.messageId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (!sessions.branch(source.id, owner.id, input.messageId, branch)) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Branch checkpoint not found",
+        status: 404,
+      });
+    }
+    return context.json({ session: branch }, 201);
   });
 
   app.get("/v1/sessions/:id/messages", (context) => {
@@ -739,6 +931,7 @@ export function createApp(dependencies: AppDependencies) {
       messages: messageRepository.list(session.id).map((message) => ({
         ...message,
         sources: publicSources(message.id),
+        attachments: publicAttachments(message.id),
       })),
     });
   });
@@ -753,8 +946,51 @@ export function createApp(dependencies: AppDependencies) {
       .object({
         message: z.string().trim().min(1).max(4_000),
         clientRequestId: z.string().trim().min(8).max(128),
+        attachments: z
+          .array(
+            z.object({
+              kind: z.enum(["image", "document"]),
+              filename: z.string().trim().min(1).max(180).nullable().default(null),
+              mediaType: z.enum([
+                "image/jpeg",
+                "image/png",
+                "image/gif",
+                "image/webp",
+                "text/plain",
+                "text/markdown",
+              ]),
+              data: z.string().min(1),
+            }),
+          )
+          .max(ATTACHMENT_MAX_COUNT)
+          .default([]),
       })
       .parse(await context.req.json());
+    const decodedAttachments = input.attachments.map((item) => {
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(item.data)) {
+        throw new AppError({
+          code: "VALIDATION_FAILED",
+          message: "Attachment data is invalid",
+          status: 400,
+        });
+      }
+      const content = Buffer.from(item.data, "base64");
+      if (!content.byteLength || content.byteLength > ATTACHMENT_MAX_BYTES) {
+        throw new AppError({
+          code: "VALIDATION_FAILED",
+          message: "Attachment must be 5 MiB or smaller",
+          status: 413,
+        });
+      }
+      if ((item.kind === "image") !== item.mediaType.startsWith("image/")) {
+        throw new AppError({
+          code: "VALIDATION_FAILED",
+          message: "Attachment kind does not match media type",
+          status: 400,
+        });
+      }
+      return { ...item, content };
+    });
     const exchange = messageRepository.createExchange({
       sessionId: session.id,
       userMessageId: createId("message"),
@@ -763,6 +999,25 @@ export function createApp(dependencies: AppDependencies) {
       clientRequestId: input.clientRequestId,
       now: new Date().toISOString(),
     });
+    if (exchange.created && decodedAttachments.length) {
+      const now = new Date().toISOString();
+      attachments.createMany(
+        decodedAttachments.map((item) => ({
+          id: createId("attachment"),
+          messageId: exchange.user.id,
+          kind: item.kind,
+          filename: item.filename,
+          mediaType: item.mediaType,
+          bytes: item.content.byteLength,
+          content: item.content,
+          createdAt: now,
+        })),
+      );
+    }
+    if (exchange.created && (!session.title || session.title === "Percakapan baru")) {
+      const title = input.message.replaceAll(/\s+/gu, " ").slice(0, 72).trim();
+      if (title) sessions.updateTitle(session.id, owner.id, title, new Date().toISOString());
+    }
     return streamAssistant(context, exchange.assistant, exchange.created);
   });
 
@@ -888,6 +1143,15 @@ export function createApp(dependencies: AppDependencies) {
         get: operation("Read the assistant profile"),
         patch: operation("Update the assistant profile"),
       },
+      "/v1/profiles": {
+        get: operation("List active assistant profiles"),
+        post: operation("Create an assistant profile", "201"),
+      },
+      "/v1/profiles/{id}": {
+        patch: operation("Update an assistant profile"),
+        delete: operation("Archive an assistant profile", "204"),
+      },
+      "/v1/models": { get: operation("List configured provider models") },
       "/v1/memories": {
         get: operation("List owner-controlled memories"),
         post: operation("Create an explicit memory", "201"),
@@ -910,7 +1174,10 @@ export function createApp(dependencies: AppDependencies) {
       },
       "/v1/sessions/{id}/messages": {
         get: operation("Read ordered durable message history"),
-        post: operation("Submit a message and stream the assistant response"),
+        post: operation("Submit a message with bounded attachments and stream the response"),
+      },
+      "/v1/sessions/{id}/branch": {
+        post: operation("Branch durable history at a completed message", "201"),
       },
       "/v1/messages/{id}/cancel": { post: operation("Cancel an active assistant response") },
       "/v1/messages/{id}/retry": { post: operation("Retry a failed assistant response") },

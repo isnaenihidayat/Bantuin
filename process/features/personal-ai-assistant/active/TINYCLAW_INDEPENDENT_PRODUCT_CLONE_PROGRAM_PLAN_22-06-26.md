@@ -3,7 +3,7 @@
 Date: 22-06-26
 Complexity: Complex — phase program
 Approval: ✅ Approved by user on 22-06-26
-Status: 🔨 ACTIVE — Phase 01 verified; Phase 02 is next
+Status: 🔨 ACTIVE — Phases 01–02 verified; Phase 03 research is next
 
 ## Context and Goals
 
@@ -54,7 +54,7 @@ Out of scope:
 | Phase | Plan | Objective | Status | Report |
 | --- | --- | --- | --- | --- |
 | 01 | `TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_PLAN_22-06-26.md` | Replace the current approximation with a faithful functional web experience | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_REPORT.md` |
-| 02 | `TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_PLAN_22-06-26.md` | Profiles, rich chat, model choice, files, knowledge, thinking, branching | ⏳ PLANNED | `reports/TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_REPORT.md` |
+| 02 | `TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_PLAN_22-06-26.md` | Profiles, rich chat, model choice, files, knowledge, thinking, branching | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_REPORT.md` |
 | 03 | `TINYCLAW_CLONE_PHASE_03_ACTIONS_PLAN_22-06-26.md` | Safe tools, MCP, automations, tasks, run history | ⏳ PLANNED | `reports/TINYCLAW_CLONE_PHASE_03_ACTIONS_REPORT.md` |
 | 04 | `TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_PLAN_22-06-26.md` | CLI, Telegram, WhatsApp, operations, backup, Docker, release | ⏳ PLANNED | `reports/TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_REPORT.md` |
 

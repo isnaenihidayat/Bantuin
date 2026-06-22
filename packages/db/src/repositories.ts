@@ -1,3 +1,4 @@
+import { createId } from "@bantuin/core";
 import type { BantuinDatabase } from "./database";
 
 export type OwnerRecord = {
@@ -12,6 +13,7 @@ export type ProfileRecord = {
   name: string;
   systemPrompt: string;
   providerModel: string | null;
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -22,6 +24,8 @@ export type SessionRecord = {
   profileId: string;
   channel: string;
   title: string | null;
+  parentSessionId: string | null;
+  branchMessageId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -40,6 +44,23 @@ export type MessageRecord = {
   providerRequestId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type AttachmentRecord = {
+  id: string;
+  messageId: string;
+  kind: "image" | "document";
+  filename: string | null;
+  mediaType:
+    | "image/jpeg"
+    | "image/png"
+    | "image/gif"
+    | "image/webp"
+    | "text/plain"
+    | "text/markdown";
+  bytes: number;
+  content: Uint8Array;
+  createdAt: string;
 };
 
 type MessageRow = {
@@ -113,12 +134,12 @@ export class ProfileRepository {
     this.#database = database;
   }
 
-  create(profile: ProfileRecord): void {
+  create(profile: Omit<ProfileRecord, "archivedAt"> & { archivedAt?: string | null }): void {
     this.#database
       .query(
         `INSERT INTO profiles(
-          id, owner_id, name, system_prompt, provider_model, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          id, owner_id, name, system_prompt, provider_model, archived_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         profile.id,
@@ -126,6 +147,7 @@ export class ProfileRepository {
         profile.name,
         profile.systemPrompt,
         profile.providerModel,
+        profile.archivedAt ?? null,
         profile.createdAt,
         profile.updatedAt,
       );
@@ -140,13 +162,14 @@ export class ProfileRepository {
           name: string;
           system_prompt: string;
           provider_model: string | null;
+          archived_at: string | null;
           created_at: string;
           updated_at: string;
         },
         [ownerId: string]
       >(
-        `SELECT id, owner_id, name, system_prompt, provider_model, created_at, updated_at
-         FROM profiles WHERE owner_id = ? ORDER BY created_at LIMIT 1`,
+        `SELECT id, owner_id, name, system_prompt, provider_model, archived_at, created_at, updated_at
+         FROM profiles WHERE owner_id = ? AND archived_at IS NULL ORDER BY created_at LIMIT 1`,
       )
       .get(ownerId);
 
@@ -157,16 +180,75 @@ export class ProfileRepository {
           name: row.name,
           systemPrompt: row.system_prompt,
           providerModel: row.provider_model,
+          archivedAt: row.archived_at,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         }
       : null;
   }
 
-  update(ownerId: string, input: { name: string; systemPrompt: string; updatedAt: string }): void {
+  findByIdForOwner(id: string, ownerId: string): ProfileRecord | null {
+    return this.list(ownerId, true).find((profile) => profile.id === id) ?? null;
+  }
+
+  list(ownerId: string, includeArchived = false): ProfileRecord[] {
+    return this.#database
+      .query<
+        {
+          id: string;
+          owner_id: string;
+          name: string;
+          system_prompt: string;
+          provider_model: string | null;
+          archived_at: string | null;
+          created_at: string;
+          updated_at: string;
+        },
+        [ownerId: string]
+      >(
+        `SELECT id, owner_id, name, system_prompt, provider_model, archived_at, created_at, updated_at
+         FROM profiles WHERE owner_id = ? ${includeArchived ? "" : "AND archived_at IS NULL"}
+         ORDER BY created_at`,
+      )
+      .all(ownerId)
+      .map((row) => ({
+        id: row.id,
+        ownerId: row.owner_id,
+        name: row.name,
+        systemPrompt: row.system_prompt,
+        providerModel: row.provider_model,
+        archivedAt: row.archived_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  update(
+    id: string,
+    ownerId: string,
+    input: { name: string; systemPrompt: string; providerModel: string | null; updatedAt: string },
+  ): boolean {
     this.#database
-      .query(`UPDATE profiles SET name = ?, system_prompt = ?, updated_at = ? WHERE owner_id = ?`)
-      .run(input.name, input.systemPrompt, input.updatedAt, ownerId);
+      .query(
+        `UPDATE profiles SET name = ?, system_prompt = ?, provider_model = ?, updated_at = ?
+         WHERE id = ? AND owner_id = ? AND archived_at IS NULL`,
+      )
+      .run(input.name, input.systemPrompt, input.providerModel, input.updatedAt, id, ownerId);
+    return Boolean(this.findByIdForOwner(id, ownerId)?.archivedAt === null);
+  }
+
+  archive(id: string, ownerId: string, archivedAt: string): boolean {
+    if (this.list(ownerId).length <= 1) return false;
+    return (
+      Number(
+        this.#database
+          .query(
+            `UPDATE profiles SET archived_at = ?, updated_at = ?
+             WHERE id = ? AND owner_id = ? AND archived_at IS NULL`,
+          )
+          .run(archivedAt, archivedAt, id, ownerId).changes,
+      ) === 1
+    );
   }
 }
 
@@ -185,7 +267,7 @@ export class AuthRepository {
 
   createSetup(input: {
     owner: OwnerRecord;
-    profile: ProfileRecord;
+    profile: Omit<ProfileRecord, "archivedAt"> & { archivedAt?: string | null };
     passwordHash: string;
   }): boolean {
     return this.#database
@@ -267,12 +349,18 @@ export class SessionRepository {
     this.#database = database;
   }
 
-  create(session: SessionRecord): void {
+  create(
+    session: Omit<SessionRecord, "parentSessionId" | "branchMessageId"> & {
+      parentSessionId?: string | null;
+      branchMessageId?: string | null;
+    },
+  ): void {
     this.#database
       .query(
         `INSERT INTO chat_sessions(
-          id, owner_id, profile_id, channel, title, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          id, owner_id, profile_id, channel, title, parent_session_id, branch_message_id,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -280,6 +368,8 @@ export class SessionRepository {
         session.profileId,
         session.channel,
         session.title,
+        session.parentSessionId ?? null,
+        session.branchMessageId ?? null,
         session.createdAt,
         session.updatedAt,
       );
@@ -294,12 +384,15 @@ export class SessionRepository {
           profile_id: string;
           channel: string;
           title: string | null;
+          parent_session_id: string | null;
+          branch_message_id: string | null;
           created_at: string;
           updated_at: string;
         },
         [id: string, ownerId: string]
       >(
-        `SELECT id, owner_id, profile_id, channel, title, created_at, updated_at
+        `SELECT id, owner_id, profile_id, channel, title, parent_session_id, branch_message_id,
+                created_at, updated_at
          FROM chat_sessions WHERE id = ? AND owner_id = ?`,
       )
       .get(id, ownerId);
@@ -311,6 +404,8 @@ export class SessionRepository {
           profileId: row.profile_id,
           channel: row.channel,
           title: row.title,
+          parentSessionId: row.parent_session_id,
+          branchMessageId: row.branch_message_id,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         }
@@ -326,12 +421,15 @@ export class SessionRepository {
           profile_id: string;
           channel: string;
           title: string | null;
+          parent_session_id: string | null;
+          branch_message_id: string | null;
           created_at: string;
           updated_at: string;
         },
         [ownerId: string]
       >(
-        `SELECT id, owner_id, profile_id, channel, title, created_at, updated_at
+        `SELECT id, owner_id, profile_id, channel, title, parent_session_id, branch_message_id,
+                created_at, updated_at
          FROM chat_sessions WHERE owner_id = ? ORDER BY updated_at DESC LIMIT 100`,
       )
       .all(ownerId)
@@ -341,8 +439,140 @@ export class SessionRepository {
         profileId: row.profile_id,
         channel: row.channel,
         title: row.title,
+        parentSessionId: row.parent_session_id,
+        branchMessageId: row.branch_message_id,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+      }));
+  }
+
+  updateTitle(id: string, ownerId: string, title: string, updatedAt: string): boolean {
+    return (
+      Number(
+        this.#database
+          .query("UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
+          .run(title, updatedAt, id, ownerId).changes,
+      ) === 1
+    );
+  }
+
+  branch(sourceId: string, ownerId: string, checkpointId: string, target: SessionRecord): boolean {
+    return this.#database
+      .transaction(() => {
+        const source = this.findByIdForOwner(sourceId, ownerId);
+        if (!source || source.profileId !== target.profileId) return false;
+        const checkpoint = this.#database
+          .query<{ sequence: number }, [checkpointId: string, sourceId: string]>(
+            "SELECT sequence FROM chat_messages WHERE id = ? AND session_id = ? AND status = 'completed'",
+          )
+          .get(checkpointId, sourceId);
+        if (!checkpoint) return false;
+        this.create(target);
+        const rows = this.#database
+          .query<MessageRow, [sourceId: string, sequence: number]>(
+            `SELECT id, session_id, sequence, role, content, status, client_request_id,
+                    error_code, provider_request_id, created_at, updated_at
+             FROM chat_messages WHERE session_id = ? AND sequence <= ? ORDER BY sequence`,
+          )
+          .all(sourceId, checkpoint.sequence);
+        const insertMessage = this.#database.query(
+          `INSERT INTO chat_messages(
+             id, session_id, sequence, role, content, status, client_request_id,
+             error_code, provider_request_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+        );
+        const insertAttachment = this.#database.query(
+          `INSERT INTO message_attachments(
+             id, message_id, kind, filename, media_type, bytes, content, created_at
+           ) SELECT ?, ?, kind, filename, media_type, bytes, content, created_at
+             FROM message_attachments WHERE id = ?`,
+        );
+        for (const row of rows) {
+          const messageId = createId("message");
+          insertMessage.run(
+            messageId,
+            target.id,
+            row.sequence,
+            row.role,
+            row.content,
+            row.status,
+            row.error_code,
+            row.provider_request_id,
+            row.created_at,
+            row.updated_at,
+          );
+          const attachments = this.#database
+            .query<{ id: string }, [messageId: string]>(
+              "SELECT id FROM message_attachments WHERE message_id = ?",
+            )
+            .all(row.id);
+          for (const attachment of attachments) {
+            insertAttachment.run(createId("attachment"), messageId, attachment.id);
+          }
+        }
+        return true;
+      })
+      .immediate();
+  }
+}
+
+export class AttachmentRepository {
+  readonly #database: BantuinDatabase;
+
+  constructor(database: BantuinDatabase) {
+    this.#database = database;
+  }
+
+  createMany(attachments: AttachmentRecord[]): void {
+    const insert = this.#database.query(
+      `INSERT INTO message_attachments(
+         id, message_id, kind, filename, media_type, bytes, content, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    this.#database.transaction(() => {
+      for (const item of attachments) {
+        insert.run(
+          item.id,
+          item.messageId,
+          item.kind,
+          item.filename,
+          item.mediaType,
+          item.bytes,
+          item.content,
+          item.createdAt,
+        );
+      }
+    })();
+  }
+
+  list(messageId: string): AttachmentRecord[] {
+    return this.#database
+      .query<
+        {
+          id: string;
+          message_id: string;
+          kind: "image" | "document";
+          filename: string | null;
+          media_type: AttachmentRecord["mediaType"];
+          bytes: number;
+          content: Uint8Array;
+          created_at: string;
+        },
+        [messageId: string]
+      >(
+        `SELECT id, message_id, kind, filename, media_type, bytes, content, created_at
+         FROM message_attachments WHERE message_id = ? ORDER BY created_at, id`,
+      )
+      .all(messageId)
+      .map((row) => ({
+        id: row.id,
+        messageId: row.message_id,
+        kind: row.kind,
+        filename: row.filename,
+        mediaType: row.media_type,
+        bytes: row.bytes,
+        content: row.content,
+        createdAt: row.created_at,
       }));
   }
 }
@@ -676,6 +906,7 @@ export class MemoryRepository {
 export type KnowledgeDocumentRecord = {
   id: string;
   ownerId: string;
+  profileId: string;
   sourceName: string;
   mediaType: "text/plain" | "text/markdown";
   checksum: string;
@@ -738,27 +969,30 @@ export class KnowledgeRepository {
   }
 
   createDocument(document: KnowledgeDocumentRecord, chunks: KnowledgeChunkInput[]): boolean {
+    const scopedChecksum = `${document.profileId}:${document.checksum}`;
     return this.#database
       .transaction(() => {
         const duplicate = this.#database
-          .query<{ id: string }, [ownerId: string, checksum: string]>(
-            "SELECT id FROM knowledge_documents WHERE owner_id = ? AND checksum = ?",
+          .query<{ id: string }, [profileId: string, checksum: string]>(
+            "SELECT id FROM knowledge_documents WHERE profile_id = ? AND checksum = ?",
           )
-          .get(document.ownerId, document.checksum);
+          .get(document.profileId, scopedChecksum);
         if (duplicate) return false;
 
         this.#database
           .query(
             `INSERT INTO knowledge_documents(
-               id, owner_id, source_name, media_type, checksum, content, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+               id, owner_id, profile_id, source_name, media_type, checksum, content, created_at,
+               updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             document.id,
             document.ownerId,
+            document.profileId,
             document.sourceName,
             document.mediaType,
-            document.checksum,
+            scopedChecksum,
             document.content,
             document.createdAt,
             document.updatedAt,
@@ -781,12 +1015,13 @@ export class KnowledgeRepository {
       .immediate();
   }
 
-  listDocuments(ownerId: string): KnowledgeDocumentRecord[] {
+  listDocuments(ownerId: string, profileId: string): KnowledgeDocumentRecord[] {
     return this.#database
       .query<
         {
           id: string;
           owner_id: string;
+          profile_id: string;
           source_name: string;
           media_type: "text/plain" | "text/markdown";
           checksum: string;
@@ -794,25 +1029,30 @@ export class KnowledgeRepository {
           created_at: string;
           updated_at: string;
         },
-        [ownerId: string]
+        [ownerId: string, profileId: string]
       >(
-        `SELECT id, owner_id, source_name, media_type, checksum, content, created_at, updated_at
-         FROM knowledge_documents WHERE owner_id = ? ORDER BY created_at DESC LIMIT 200`,
+        `SELECT id, owner_id, profile_id, source_name, media_type, checksum, content, created_at,
+                updated_at
+         FROM knowledge_documents WHERE owner_id = ? AND profile_id = ?
+         ORDER BY created_at DESC LIMIT 200`,
       )
-      .all(ownerId)
+      .all(ownerId, profileId)
       .map((row) => ({
         id: row.id,
         ownerId: row.owner_id,
+        profileId: row.profile_id,
         sourceName: row.source_name,
         mediaType: row.media_type,
-        checksum: row.checksum,
+        checksum: row.checksum.startsWith(`${row.profile_id}:`)
+          ? row.checksum.slice(row.profile_id.length + 1)
+          : row.checksum,
         content: row.content,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       }));
   }
 
-  search(ownerId: string, text: string, limit = 5): KnowledgeSource[] {
+  search(ownerId: string, profileId: string, text: string, limit = 5): KnowledgeSource[] {
     const query = buildFtsQuery(text);
     if (!query) return [];
     return this.#database
@@ -826,7 +1066,7 @@ export class KnowledgeRepository {
           content: string;
           score: number;
         },
-        [query: string, ownerId: string, limit: number]
+        [query: string, ownerId: string, profileId: string, limit: number]
       >(
         `SELECT knowledge_chunks.id, knowledge_chunks.public_id,
                 knowledge_chunks.document_id, knowledge_documents.source_name,
@@ -836,9 +1076,10 @@ export class KnowledgeRepository {
          JOIN knowledge_chunks ON knowledge_chunks.id = knowledge_chunks_fts.rowid
          JOIN knowledge_documents ON knowledge_documents.id = knowledge_chunks.document_id
          WHERE knowledge_chunks_fts MATCH ? AND knowledge_documents.owner_id = ?
+           AND knowledge_documents.profile_id = ?
          ORDER BY score LIMIT ?`,
       )
-      .all(query, ownerId, limit)
+      .all(query, ownerId, profileId, limit)
       .map((row) => ({
         id: row.id,
         chunkId: row.public_id,
@@ -901,16 +1142,16 @@ export class KnowledgeRepository {
       }));
   }
 
-  deleteDocument(id: string, ownerId: string): boolean {
+  deleteDocument(id: string, ownerId: string, profileId: string): boolean {
     const owned = this.#database
-      .query<{ value: number }, [id: string, ownerId: string]>(
-        "SELECT 1 AS value FROM knowledge_documents WHERE id = ? AND owner_id = ?",
+      .query<{ value: number }, [id: string, ownerId: string, profileId: string]>(
+        "SELECT 1 AS value FROM knowledge_documents WHERE id = ? AND owner_id = ? AND profile_id = ?",
       )
-      .get(id, ownerId);
+      .get(id, ownerId, profileId);
     if (!owned) return false;
     this.#database
-      .query("DELETE FROM knowledge_documents WHERE id = ? AND owner_id = ?")
-      .run(id, ownerId);
+      .query("DELETE FROM knowledge_documents WHERE id = ? AND owner_id = ? AND profile_id = ?")
+      .run(id, ownerId, profileId);
     return !this.#database
       .query<{ value: number }, [id: string]>(
         "SELECT 1 AS value FROM knowledge_documents WHERE id = ?",

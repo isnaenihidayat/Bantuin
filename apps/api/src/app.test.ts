@@ -581,4 +581,123 @@ describe("core chat authentication", () => {
       documents: [],
     });
   });
+
+  test("isolates profiles, stores bounded attachments, and branches durable history", async () => {
+    const provider = new CapturingProvider();
+    const app = testApp(provider);
+    const setup = await app.request("/v1/setup", {
+      method: "POST",
+      headers: mutationHeaders,
+      body: JSON.stringify({
+        email: "phase2@example.test",
+        password: "correct horse battery staple",
+      }),
+    });
+    const cookie = setup.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+    const headers = { ...mutationHeaders, cookie };
+    const firstProfile = ((await setup.json()) as { profile: { id: string } }).profile;
+    const createdProfile = await app.request("/v1/profiles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: "Raka",
+        systemPrompt: "Jawab sebagai Raka.",
+        providerModel: "mock",
+      }),
+    });
+    const secondProfile = ((await createdProfile.json()) as { profile: { id: string } }).profile;
+    expect(createdProfile.status).toBe(201);
+
+    const createdSession = await app.request("/v1/sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ profileId: secondProfile.id, title: "Percakapan baru" }),
+    });
+    const session = ((await createdSession.json()) as { session: { id: string } }).session;
+    const response = await app.request(`/v1/sessions/${session.id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        message: "Jelaskan lampiran",
+        clientRequestId: "phase2-message-1",
+        attachments: [
+          {
+            kind: "image",
+            filename: "contoh.png",
+            mediaType: "image/png",
+            data: "AQID",
+          },
+          {
+            kind: "document",
+            filename: "catatan.txt",
+            mediaType: "text/plain",
+            data: Buffer.from("Isi dokumen").toString("base64"),
+          },
+        ],
+      }),
+    });
+    expect(await response.text()).toContain("message.completed");
+    expect(provider.requests.at(-1)).toMatchObject({ model: "mock" });
+    expect(provider.requests.at(-1)?.messages.at(-1)?.images).toHaveLength(1);
+    expect(provider.requests.at(-1)?.messages.at(-1)?.content).toContain("Isi dokumen");
+
+    const history = (await (
+      await app.request(`/v1/sessions/${session.id}/messages`, { headers: { cookie } })
+    ).json()) as {
+      messages: Array<{ id: string; role: string; attachments: unknown[] }>;
+    };
+    expect(history.messages[0]?.attachments).toHaveLength(2);
+    expect(
+      (
+        await app.request(`/v1/sessions/${session.id}/messages`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            message: "Lampiran rusak",
+            clientRequestId: "phase2-invalid-attachment",
+            attachments: [
+              {
+                kind: "image",
+                filename: "rusak.png",
+                mediaType: "image/png",
+                data: "bukan base64!",
+              },
+            ],
+          }),
+        })
+      ).status,
+    ).toBe(400);
+    const assistantId = history.messages.find((message) => message.role === "assistant")?.id;
+    const branch = await app.request(`/v1/sessions/${session.id}/branch`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ messageId: assistantId }),
+    });
+    const branchedSession = ((await branch.json()) as { session: { id: string } }).session;
+    expect(branch.status).toBe(201);
+    const branchedHistory = await app.request(`/v1/sessions/${branchedSession.id}/messages`, {
+      headers: { cookie },
+    });
+    expect(((await branchedHistory.json()) as { messages: unknown[] }).messages).toHaveLength(2);
+
+    expect(
+      (
+        await app.request(`/v1/profiles/${secondProfile.id}`, {
+          method: "DELETE",
+          headers,
+        })
+      ).status,
+    ).toBe(204);
+    expect(
+      (
+        await app.request(`/v1/profiles/${firstProfile.id}`, {
+          method: "DELETE",
+          headers,
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (await app.request(`/v1/sessions/${session.id}/messages`, { headers: { cookie } })).status,
+    ).toBe(200);
+  });
 });

@@ -2,6 +2,7 @@ import type { BantuinDatabase } from "./database";
 import initialMigration from "../migrations/0001_initial.sql";
 import coreChatMigration from "../migrations/0002_core_chat.sql";
 import memoryKnowledgeMigration from "../migrations/0003_memory_knowledge.sql";
+import assistantCapabilitiesMigration from "../migrations/0004_assistant_capabilities.sql";
 
 type Migration = {
   version: number;
@@ -24,6 +25,11 @@ const migrations: Migration[] = [
     version: 3,
     name: "memory_knowledge",
     sql: memoryKnowledgeMigration,
+  },
+  {
+    version: 4,
+    name: "assistant_capabilities",
+    sql: assistantCapabilitiesMigration,
   },
 ];
 

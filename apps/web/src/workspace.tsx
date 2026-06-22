@@ -1,5 +1,6 @@
 import { parseSseFrames } from "@bantuin/client";
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import Markdown from "react-markdown";
 import { api, mutationHeaders } from "./api";
 
 export type Owner = { id: string; email: string; createdAt: string };
@@ -8,9 +9,18 @@ export type Profile = {
   name: string;
   systemPrompt: string;
   providerModel: string | null;
+  archivedAt?: string | null;
 };
-type Session = { id: string; title: string | null; updatedAt: string };
+type Session = { id: string; profileId: string; title: string | null; updatedAt: string };
 type MessageSource = { chunkId: string; documentId: string; sourceName: string; ordinal: number };
+type MessageAttachment = {
+  id: string;
+  kind: "image" | "document";
+  filename: string | null;
+  mediaType: string;
+  bytes: number;
+  data: string;
+};
 type Message = {
   id: string;
   sessionId: string;
@@ -19,6 +29,7 @@ type Message = {
   content: string;
   status: "pending" | "streaming" | "completed" | "failed" | "cancelled";
   sources?: MessageSource[];
+  attachments?: MessageAttachment[];
 };
 type Memory = {
   id: string;
@@ -27,6 +38,7 @@ type Memory = {
   status: "active" | "archived";
 };
 type KnowledgeDocument = { id: string; sourceName: string; bytes: number };
+type ProviderModel = { id: string; name: string };
 type WorkspaceView = "chat" | "history" | "profile" | "system" | "status" | "settings";
 type SystemStatus = {
   health: { status: "ok"; apiVersion: string; timestamp: string };
@@ -36,6 +48,15 @@ type SystemStatus = {
     timestamp: string;
   };
 };
+
+function fileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Tidak dapat membaca ${file.name}.`));
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+    reader.readAsDataURL(file);
+  });
+}
 
 const navigationGroups: Array<{
   label: string;
@@ -137,6 +158,8 @@ export function Workspace({
   onLogout: () => void;
 }) {
   const [profile, setProfile] = useState(initialProfile);
+  const [profiles, setProfiles] = useState<Profile[]>([initialProfile]);
+  const [selectedProfileId, setSelectedProfileId] = useState(initialProfile.id);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -146,8 +169,10 @@ export function Workspace({
   const [activeView, setActiveView] = useState<WorkspaceView>("chat");
   const [memories, setMemories] = useState<Memory[]>([]);
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
+  const [models, setModels] = useState<ProviderModel[]>([]);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [settingsError, setSettingsError] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [railCollapsed, setRailCollapsed] = useState(
     () => window.localStorage.getItem("bantuin.sidebar.collapsed") === "1",
   );
@@ -179,12 +204,27 @@ export function Workspace({
     if (nextId) await loadMessages(nextId);
   }
 
+  async function loadProfiles(preferredId = selectedProfileId) {
+    const result = await api<{ profiles: Profile[] }>("/v1/profiles");
+    setProfiles(result.profiles);
+    const selected = result.profiles.find((item) => item.id === preferredId) ?? result.profiles[0];
+    if (selected) {
+      setSelectedProfileId(selected.id);
+      setProfile(selected);
+    }
+  }
+
   async function loadMessages(sessionId: string) {
     const result = await api<{ messages: Message[] }>(`/v1/sessions/${sessionId}/messages`);
     setMessages(result.messages);
   }
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: workspace bootstrap runs once for the authenticated owner.
   useEffect(() => {
+    void loadProfiles(initialProfile.id).catch(() => undefined);
+    void api<{ models: ProviderModel[] }>("/v1/models")
+      .then((result) => setModels(result.models))
+      .catch(() => undefined);
     void api<{ sessions: Session[] }>("/v1/sessions")
       .then(async (result) => {
         setSessions(result.sessions);
@@ -210,7 +250,7 @@ export function Workspace({
     const result = await api<{ session: Session }>("/v1/sessions", {
       method: "POST",
       headers: mutationHeaders,
-      body: JSON.stringify({ title: "Percakapan baru" }),
+      body: JSON.stringify({ title: "Percakapan baru", profileId: selectedProfileId }),
     });
     setActiveView("chat");
     setMessages([]);
@@ -233,6 +273,14 @@ export function Workspace({
     setSelectedId(sessionId);
     setActiveView("chat");
     try {
+      const session = sessions.find((item) => item.id === sessionId);
+      const sessionProfile = session
+        ? profiles.find((item) => item.id === session.profileId)
+        : undefined;
+      if (sessionProfile) {
+        setSelectedProfileId(sessionProfile.id);
+        setProfile(sessionProfile);
+      }
       await loadMessages(sessionId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Percakapan tidak dapat dimuat.");
@@ -314,9 +362,21 @@ export function Workspace({
       const response = await fetch(`/v1/sessions/${sessionId}/messages`, {
         method: "POST",
         headers: mutationHeaders,
-        body: JSON.stringify({ message: content, clientRequestId: crypto.randomUUID() }),
+        body: JSON.stringify({
+          message: content,
+          clientRequestId: crypto.randomUUID(),
+          attachments: await Promise.all(
+            pendingFiles.map(async (file) => ({
+              kind: file.type.startsWith("image/") ? "image" : "document",
+              filename: file.name,
+              mediaType: file.type || (file.name.endsWith(".md") ? "text/markdown" : "text/plain"),
+              data: await fileAsBase64(file),
+            })),
+          ),
+        }),
       });
       await consumeStream(response);
+      setPendingFiles([]);
       await loadMessages(sessionId);
       await loadSessions(sessionId);
     } catch (caught) {
@@ -356,29 +416,96 @@ export function Workspace({
     const form = new FormData(event.currentTarget);
     setSettingsError("");
     try {
-      const result = await api<{ profile: Profile }>("/v1/profile", {
+      const result = await api<{ profile: Profile }>(`/v1/profiles/${selectedProfileId}`, {
         method: "PATCH",
         headers: mutationHeaders,
-        body: JSON.stringify({ name: form.get("name"), systemPrompt: form.get("systemPrompt") }),
+        body: JSON.stringify({
+          name: form.get("name"),
+          systemPrompt: form.get("systemPrompt"),
+          providerModel: form.get("providerModel") || null,
+        }),
       });
       setProfile(result.profile);
+      setProfiles((current) =>
+        current.map((item) => (item.id === result.profile.id ? result.profile : item)),
+      );
     } catch (caught) {
       setSettingsError(caught instanceof Error ? caught.message : "Profil tidak dapat disimpan.");
     }
   }
 
-  async function loadSystemData() {
+  async function createProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setSettingsError("");
+    try {
+      const result = await api<{ profile: Profile }>("/v1/profiles", {
+        method: "POST",
+        headers: mutationHeaders,
+        body: JSON.stringify({ name: form.get("name"), systemPrompt: "", providerModel: null }),
+      });
+      await loadProfiles(result.profile.id);
+      event.currentTarget.reset();
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Profil tidak dapat dibuat.");
+    }
+  }
+
+  async function archiveProfile() {
+    if (!window.confirm(`Arsipkan profil ${profile.name}? Riwayat chat tetap disimpan.`)) return;
+    setSettingsError("");
+    try {
+      await api(`/v1/profiles/${profile.id}`, { method: "DELETE", headers: mutationHeaders });
+      await loadProfiles();
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Profil tidak dapat diarsipkan.");
+    }
+  }
+
+  async function selectProfile(id: string) {
+    const selected = profiles.find((item) => item.id === id);
+    if (!selected) return;
+    setSelectedProfileId(id);
+    setProfile(selected);
+    setSelectedId(null);
+    setMessages([]);
+    setPendingFiles([]);
+    if (activeView === "system") await loadSystemDataForProfile(id);
+  }
+
+  async function branchMessage(messageId: string) {
+    if (!selectedId) return;
+    setError("");
+    try {
+      const result = await api<{ session: Session }>(`/v1/sessions/${selectedId}/branch`, {
+        method: "POST",
+        headers: mutationHeaders,
+        body: JSON.stringify({ messageId }),
+      });
+      await loadSessions(result.session.id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Percakapan tidak dapat dicabangkan.");
+    }
+  }
+
+  async function loadSystemDataForProfile(profileId: string) {
     setSettingsError("");
     try {
       const [memoryResult, knowledgeResult] = await Promise.all([
         api<{ memories: Memory[] }>("/v1/memories"),
-        api<{ documents: KnowledgeDocument[] }>("/v1/knowledge"),
+        api<{ documents: KnowledgeDocument[] }>(
+          `/v1/knowledge?profileId=${encodeURIComponent(profileId)}`,
+        ),
       ]);
       setMemories(memoryResult.memories);
       setDocuments(knowledgeResult.documents);
     } catch (caught) {
       setSettingsError(caught instanceof Error ? caught.message : "Data tidak dapat dimuat.");
     }
+  }
+
+  async function loadSystemData() {
+    await loadSystemDataForProfile(selectedProfileId);
   }
 
   async function loadStatus() {
@@ -469,7 +596,11 @@ export function Workspace({
       const result = await api<{ document: KnowledgeDocument }>("/v1/knowledge", {
         method: "POST",
         headers: mutationHeaders,
-        body: JSON.stringify({ sourceName: file.name, content: await file.text() }),
+        body: JSON.stringify({
+          profileId: selectedProfileId,
+          sourceName: file.name,
+          content: await file.text(),
+        }),
       });
       setDocuments((current) => [result.document, ...current]);
       event.currentTarget.reset();
@@ -481,7 +612,10 @@ export function Workspace({
   async function deleteKnowledge(id: string) {
     if (!window.confirm("Hapus dokumen dan indeks pencariannya secara permanen?")) return;
     try {
-      await api(`/v1/knowledge/${id}`, { method: "DELETE", headers: mutationHeaders });
+      await api(`/v1/knowledge/${id}?profileId=${encodeURIComponent(selectedProfileId)}`, {
+        method: "DELETE",
+        headers: mutationHeaders,
+      });
       setDocuments((current) => current.filter((document) => document.id !== id));
     } catch (caught) {
       setSettingsError(caught instanceof Error ? caught.message : "Knowledge tidak dapat dihapus.");
@@ -615,7 +749,28 @@ export function Workspace({
                   <p className="message-author">
                     {message.role === "user" ? "Kamu" : profile.name}
                   </p>
-                  <div>{message.content || <span className="typing-dots">•••</span>}</div>
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="message-attachments">
+                      {message.attachments.map((attachment) =>
+                        attachment.kind === "image" ? (
+                          <img
+                            key={attachment.id}
+                            src={`data:${attachment.mediaType};base64,${attachment.data}`}
+                            alt={attachment.filename ?? "Lampiran gambar"}
+                          />
+                        ) : (
+                          <span key={attachment.id}>▤ {attachment.filename ?? "Dokumen"}</span>
+                        ),
+                      )}
+                    </div>
+                  )}
+                  <div className="message-content">
+                    {message.content ? (
+                      <Markdown>{message.content}</Markdown>
+                    ) : (
+                      <span className="typing-dots">•••</span>
+                    )}
+                  </div>
                   {message.sources && message.sources.length > 0 && (
                     <ul className="message-sources" aria-label="Sumber jawaban">
                       {message.sources.map((source) => (
@@ -630,6 +785,19 @@ export function Workspace({
                       {message.status === "cancelled" ? "Balasan dihentikan." : "Balasan terputus."}
                       <button type="button" onClick={() => void retry(message)}>
                         Coba lagi
+                      </button>
+                    </div>
+                  )}
+                  {message.role === "assistant" && message.status === "completed" && (
+                    <div className="message-actions">
+                      <button
+                        type="button"
+                        onClick={() => void navigator.clipboard.writeText(message.content)}
+                      >
+                        Salin
+                      </button>
+                      <button type="button" onClick={() => void branchMessage(message.id)}>
+                        Buat cabang
                       </button>
                     </div>
                   )}
@@ -664,7 +832,30 @@ export function Workspace({
                 maxLength={4000}
               />
               <div className="composer-meta">
-                <span className="profile-chip">{profile.name}</span>
+                <label className="attachment-button" title="Tambah lampiran">
+                  ＋<span className="sr-only">Tambah lampiran</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept="image/jpeg,image/png,image/gif,image/webp,.txt,.md,text/plain,text/markdown"
+                    onChange={(event) =>
+                      setPendingFiles(Array.from(event.currentTarget.files ?? []).slice(0, 5))
+                    }
+                  />
+                </label>
+                <select
+                  className="profile-chip"
+                  aria-label="Profil asisten"
+                  value={selectedProfileId}
+                  disabled={Boolean(streamingId)}
+                  onChange={(event) => void selectProfile(event.target.value)}
+                >
+                  {profiles.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
                 <span
                   className="model-label"
                   title={profile.providerModel ?? "Model provider default"}
@@ -688,6 +879,24 @@ export function Workspace({
                 </button>
               )}
             </form>
+            {pendingFiles.length > 0 && (
+              <div className="pending-files">
+                {pendingFiles.map((file) => (
+                  <span key={`${file.name}-${file.size}`}>
+                    {file.name}
+                    <button
+                      type="button"
+                      aria-label={`Hapus ${file.name}`}
+                      onClick={() =>
+                        setPendingFiles((current) => current.filter((item) => item !== file))
+                      }
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <small aria-live="polite">
               {streamingId
                 ? `${profile.name} sedang menjawab…`
@@ -741,19 +950,60 @@ export function Workspace({
                     {settingsError}
                   </p>
                 )}
-                <form className="page-form" onSubmit={saveProfile}>
-                  <label>
-                    Nama asisten
-                    <input name="name" defaultValue={profile.name} required maxLength={80} />
-                  </label>
-                  <label>
-                    Instruksi dasar
-                    <textarea name="systemPrompt" defaultValue={profile.systemPrompt} rows={8} />
-                  </label>
-                  <button className="secondary-button" type="submit">
-                    Simpan profil
-                  </button>
-                </form>
+                <div className="profile-manager">
+                  <aside className="profile-list">
+                    {profiles.map((item) => (
+                      <button
+                        className={item.id === selectedProfileId ? "active" : undefined}
+                        type="button"
+                        key={item.id}
+                        onClick={() => void selectProfile(item.id)}
+                      >
+                        <span>{item.name[0]?.toUpperCase()}</span>
+                        {item.name}
+                      </button>
+                    ))}
+                    <form onSubmit={createProfile}>
+                      <input name="name" placeholder="Nama profil baru" required maxLength={80} />
+                      <button className="secondary-button" type="submit">
+                        Tambah
+                      </button>
+                    </form>
+                  </aside>
+                  <form className="page-form" key={profile.id} onSubmit={saveProfile}>
+                    <label>
+                      Nama asisten
+                      <input name="name" defaultValue={profile.name} required maxLength={80} />
+                    </label>
+                    <label>
+                      Model
+                      <select name="providerModel" defaultValue={profile.providerModel ?? ""}>
+                        <option value="">Gunakan model provider default</option>
+                        {models.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Instruksi dasar
+                      <textarea name="systemPrompt" defaultValue={profile.systemPrompt} rows={8} />
+                    </label>
+                    <div className="profile-actions">
+                      <button className="secondary-button" type="submit">
+                        Simpan profil
+                      </button>
+                      <button
+                        className="danger-link"
+                        type="button"
+                        onClick={() => void archiveProfile()}
+                      >
+                        Arsipkan
+                      </button>
+                    </div>
+                  </form>
+                </div>
               </>
             )}
 

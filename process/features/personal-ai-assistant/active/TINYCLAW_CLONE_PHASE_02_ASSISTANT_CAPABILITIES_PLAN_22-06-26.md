@@ -2,7 +2,9 @@
 
 Date: 22-06-26
 Complexity: Complex — phase 2 of 4
-Status: ⏳ PLANNED
+Approval: ✅ Contract approved by user on 22-06-26
+Completion Approval: ✅ Approved by user on 23-06-26
+Status: ✅ VERIFIED
 
 ## Context and Objective
 
@@ -14,7 +16,7 @@ Completion requires integration, manual, state, failure, and user-confirmation e
 
 ## Dependencies
 
-Phase 01 ✅ VERIFIED. Data model and upload limits require separate approval before migration.
+Phase 01 ✅ VERIFIED. Profile archive semantics, per-profile knowledge, separate 5 MiB attachment storage, and the thinking deferral were approved before migration.
 
 ## Scope
 
@@ -51,26 +53,26 @@ Rerun all Phase 01 flows plus profile/rich-chat integration, restart, deletion, 
 
 ## Acceptance Criteria
 
-- [ ] Profiles, model choice, supported files, knowledge, thinking, retry, and branching work.
-- [ ] Messages and provenance remain durable and owner-scoped across restart.
-- [ ] Upload and provider failures are bounded and recoverable.
-- [ ] Existing clients remain compatible or migrate through a versioned contract.
-- [ ] User confirms the complete rich-chat flow.
+- [x] Profiles, model choice, supported files, knowledge, retry, and branching work; thinking remains explicitly deferred by the approved contract.
+- [x] Messages and provenance remain durable and owner-scoped across restart.
+- [x] Upload and provider failures are bounded and recoverable.
+- [x] Existing clients remain compatible or migrate through a versioned contract.
+- [x] User confirms the complete rich-chat flow.
 
 ## Implementation Checklist
 
-- [ ] Re-research pinned profile/chat flows and present contract delta.
-- [ ] Approve schema/API/event changes.
-- [ ] Write migration and repository tests first.
-- [ ] Implement profile and rich-chat use cases minimally.
-- [ ] Connect verified Phase 01 pages.
-- [ ] Verify restart, deletion, failure, and accessibility.
-- [ ] Record provenance/dependency changes.
-- [ ] Receive user confirmation before commit or push.
+- [x] Re-research pinned profile/chat flows and present contract delta.
+- [x] Approve schema/API/event changes.
+- [x] Write migration and repository tests first.
+- [x] Implement profile and rich-chat use cases minimally.
+- [x] Connect verified Phase 01 pages.
+- [x] Verify restart, deletion, failure, and accessibility; automated browser regression remains documented as unavailable.
+- [x] Record provenance/dependency changes.
+- [x] Receive user confirmation before commit or push.
 
 ## Verification Evidence
 
-Report commands, schema/state queries, event samples without secrets, browser flows, failure results, and approval.
+Automated, restart, dependency, safe Markdown, and user-confirmation evidence is recorded in `reports/TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_REPORT.md`. Automated browser regression was unavailable; thinking state is deferred by the approved contract.
 
 ## Resume and Execution Handoff
 
@@ -80,4 +82,4 @@ Read `process/context/all-context.md`, the umbrella, Phase 01 report, current co
 
 Cursor Plan imports this checklist. RIPER-5 may enter RESEARCH only after Phase 01 verification.
 
-Next Step: do not start execution until Phase 01 is ✅ VERIFIED.
+Next Step: commit and push the approved Phase 02 changes, then begin Phase 03 contract research only.

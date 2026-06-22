@@ -6,6 +6,7 @@ const prefixes = {
   memory: "mem",
   document: "doc",
   chunk: "chk",
+  attachment: "att",
   request: "req",
 } as const;
 

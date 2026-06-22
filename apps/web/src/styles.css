@@ -562,9 +562,91 @@ label small,
   font-size: 0.6875rem;
   font-weight: 600;
 }
-.message > div {
-  white-space: pre-wrap;
+.message-content {
   overflow-wrap: anywhere;
+}
+.message-content > :first-child {
+  margin-top: 0;
+}
+.message-content > :last-child {
+  margin-bottom: 0;
+}
+.message-content pre {
+  padding: 0.75rem;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface-raised);
+  white-space: pre;
+}
+.message-content code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+}
+.message-content :not(pre) > code {
+  padding: 0.12rem 0.3rem;
+  border-radius: 0.25rem;
+  background: var(--surface-raised);
+}
+.message-content a {
+  color: inherit;
+}
+.message-content ul,
+.message-content ol {
+  padding-left: 1.25rem;
+}
+.message-content blockquote {
+  margin-left: 0;
+  padding-left: 0.8rem;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-soft);
+}
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+.message-attachments img {
+  width: auto;
+  max-width: min(100%, 20rem);
+  max-height: 15rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  object-fit: contain;
+}
+.message-attachments span,
+.pending-files > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 0.6875rem;
+}
+.message-actions {
+  display: flex;
+  gap: 0.65rem;
+  margin-top: 0.45rem;
+  opacity: 0;
+}
+.message:hover .message-actions,
+.message:focus-within .message-actions {
+  opacity: 1;
+}
+.message-actions button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-quiet);
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+.message-actions button:hover {
+  color: var(--text);
 }
 .message-sources {
   margin: 0.75rem 0 0;
@@ -628,12 +710,45 @@ label small,
   align-items: center;
   gap: 0.5rem;
 }
+.attachment-button {
+  display: grid;
+  width: 1.8rem;
+  height: 1.8rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  cursor: pointer;
+}
+.attachment-button input {
+  display: none;
+}
 .profile-chip {
+  width: auto;
+  min-height: 1.8rem;
   padding: 0.3rem 0.55rem;
+  border: 0;
   border-radius: 999px;
   background: var(--surface-raised);
   font-size: 0.6875rem;
   font-weight: 600;
+}
+.pending-files {
+  display: flex;
+  max-width: 48rem;
+  gap: 0.35rem;
+  margin: 0.45rem auto 0;
+  overflow-x: auto;
+}
+.pending-files > span {
+  flex: 0 0 auto;
+}
+.pending-files button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
 }
 .model-label {
   max-width: 12rem;
@@ -764,6 +879,53 @@ label small,
 }
 .page-form {
   max-width: 42rem;
+}
+.profile-manager {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  gap: 1.5rem;
+}
+.profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.profile-list > button {
+  display: flex;
+  min-height: 2.5rem;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0 0.55rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+.profile-list > button:hover,
+.profile-list > button.active {
+  background: var(--surface-raised);
+}
+.profile-list > button > span {
+  display: grid;
+  width: 1.65rem;
+  height: 1.65rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+.profile-list form {
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+.profile-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 .system-grid {
   display: grid;
@@ -1052,6 +1214,13 @@ label small,
   .system-grid {
     grid-template-columns: 1fr;
     gap: 1rem;
+  }
+  .profile-manager {
+    grid-template-columns: 1fr;
+  }
+  .profile-list {
+    max-height: 12rem;
+    overflow-y: auto;
   }
   .settings-actions {
     align-items: stretch;

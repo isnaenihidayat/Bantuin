@@ -1,8 +1,14 @@
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
+export type ChatImage = {
+  mediaType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+  data: string;
+};
+
 export type ChatMessage = {
   role: ChatRole;
   content: string;
+  images?: ChatImage[];
   name?: string;
   toolCallId?: string;
 };

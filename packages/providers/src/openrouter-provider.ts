@@ -23,6 +23,22 @@ function toOpenRouterMessage(message: ChatMessage) {
     };
   }
 
+  if (message.role === "user") {
+    return {
+      role: "user" as const,
+      content: message.images?.length
+        ? [
+            { type: "text" as const, text: message.content },
+            ...message.images.map((image) => ({
+              type: "image_url" as const,
+              imageUrl: { url: `data:${image.mediaType};base64,${image.data}` },
+            })),
+          ]
+        : message.content,
+      ...(message.name ? { name: message.name } : {}),
+    };
+  }
+
   return {
     role: message.role,
     content: message.content,
