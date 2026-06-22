@@ -700,4 +700,124 @@ describe("core chat authentication", () => {
       (await app.request(`/v1/sessions/${session.id}/messages`, { headers: { cookie } })).status,
     ).toBe(200);
   });
+
+  test("runs prompt-only tasks and keeps MCP metadata non-executable", async () => {
+    const provider = new CapturingProvider();
+    const app = testApp(provider);
+    const setup = await app.request("/v1/setup", {
+      method: "POST",
+      headers: mutationHeaders,
+      body: JSON.stringify({
+        email: "actions@example.test",
+        password: "correct horse battery staple",
+      }),
+    });
+    const cookie = setup.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+    const headers = { ...mutationHeaders, cookie };
+    const profile = ((await setup.json()) as { profile: { id: string } }).profile;
+
+    const created = await app.request("/v1/tasks", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        profileId: profile.id,
+        title: "Ringkas",
+        prompt: "Ringkas hari ini",
+        status: "todo",
+      }),
+    });
+    const task = ((await created.json()) as { task: { id: string } }).task;
+    expect(created.status).toBe(201);
+    expect(
+      (await app.request(`/v1/tasks/${task.id}/run`, { method: "POST", headers })).status,
+    ).toBe(202);
+    await Bun.sleep(5);
+    const runs = (await (
+      await app.request(`/v1/tasks/${task.id}/runs`, { headers: { cookie } })
+    ).json()) as {
+      runs: Array<{ status: string; output: string }>;
+    };
+    expect(runs.runs[0]).toMatchObject({
+      status: "completed",
+      output: "Cuti tahunan adalah 12 hari.",
+    });
+
+    expect(
+      (
+        await app.request("/v1/automations", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            name: "Rusak",
+            prompt: "Tes",
+            triggerType: "schedule",
+            cron: "not cron",
+            timezone: "UTC",
+          }),
+        })
+      ).status,
+    ).toBe(400);
+
+    expect(
+      (
+        await app.request("/v1/mcp-servers", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            name: "Lokal",
+            url: "http://127.0.0.1:3000",
+            profileId: profile.id,
+          }),
+        })
+      ).status,
+    ).toBe(400);
+    const metadata = await app.request("/v1/mcp-servers", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: "Referensi",
+        url: "https://mcp.example.test",
+        profileId: profile.id,
+        cachedTools: [{ name: "search", description: "Metadata only" }],
+      }),
+    });
+    expect(metadata.status).toBe(201);
+    expect(await metadata.json()).toMatchObject({ server: { enabled: false } });
+    expect(provider.requests.at(-1)?.messages.at(-1)?.content).toBe("Ringkas hari ini");
+  });
+
+  test("cancels an owner-scoped prompt run durably", async () => {
+    const app = testApp(new CancelThenCompleteProvider());
+    const setup = await app.request("/v1/setup", {
+      method: "POST",
+      headers: mutationHeaders,
+      body: JSON.stringify({
+        email: "cancel-run@example.test",
+        password: "correct horse battery staple",
+      }),
+    });
+    const cookie = setup.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+    const headers = { ...mutationHeaders, cookie };
+    const taskResponse = await app.request("/v1/tasks", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Tunggu", prompt: "Tunggu", status: "todo" }),
+    });
+    const task = ((await taskResponse.json()) as { task: { id: string } }).task;
+    const started = await app.request(`/v1/tasks/${task.id}/run`, { method: "POST", headers });
+    const run = ((await started.json()) as { run: { id: string } }).run;
+    expect(
+      (await app.request(`/v1/runs/${run.id}/cancel`, { method: "POST", headers })).status,
+    ).toBe(200);
+    await Bun.sleep(5);
+    const history = (await (
+      await app.request(`/v1/tasks/${task.id}/runs`, { headers: { cookie } })
+    ).json()) as {
+      runs: Array<{ status: string; error: string }>;
+    };
+    expect(history.runs[0]).toMatchObject({
+      status: "cancelled",
+      error: "RUN_CANCELLED_OR_TIMED_OUT",
+    });
+  });
 });

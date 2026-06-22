@@ -9,7 +9,10 @@ import {
 } from "@bantuin/core";
 import {
   AuthRepository,
+  ActionRepository,
+  type AutomationRecord,
   AttachmentRepository,
+  McpMetadataRepository,
   chunkKnowledgeText,
   checkDatabase,
   type BantuinDatabase,
@@ -21,6 +24,7 @@ import {
   type MemoryType,
   ProfileRepository,
   SessionRepository,
+  type TaskRecord,
 } from "@bantuin/db";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { Context } from "hono";
@@ -28,6 +32,7 @@ import { bodyLimit } from "hono/body-limit";
 import { serveStatic } from "hono/bun";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { secureHeaders } from "hono/secure-headers";
+import { SafeActionService, validCron } from "./safe-actions";
 
 type Variables = {
   requestId: string;
@@ -56,6 +61,7 @@ export type AppDependencies = {
   config: AppConfig;
   database: BantuinDatabase;
   agent: AgentService;
+  safeActions?: SafeActionService;
 };
 
 const healthSchema = z.object({
@@ -108,6 +114,10 @@ export function createApp(dependencies: AppDependencies) {
   const memories = new MemoryRepository(dependencies.database);
   const knowledge = new KnowledgeRepository(dependencies.database);
   const attachments = new AttachmentRepository(dependencies.database);
+  const safeActions =
+    dependencies.safeActions ?? new SafeActionService(dependencies.database, dependencies.agent);
+  const actions = new ActionRepository(dependencies.database);
+  const mcpMetadata = new McpMetadataRepository(dependencies.database);
   const activeStreams = new Map<string, AbortController>();
   // ponytail: single-process limiter; move to shared storage before horizontal deployment.
   const loginFailures = new Map<string, { count: number; resetAt: number }>();
@@ -649,6 +659,342 @@ export function createApp(dependencies: AppDependencies) {
     return context.json({ models: [{ id: model, name: model.split("/").at(-1) ?? model }] });
   });
 
+  const taskStatuses = ["backlog", "todo", "in_progress", "done", "failed"] as const;
+  const publicTask = ({ ownerId: _ownerId, archivedAt: _archivedAt, ...task }: TaskRecord) => task;
+  const publicAutomation = ({
+    ownerId: _ownerId,
+    archivedAt: _archivedAt,
+    ...automation
+  }: AutomationRecord) => automation;
+  const requireProfile = (ownerId: string, profileId?: string) => {
+    const profile = profileId
+      ? profiles.findByIdForOwner(profileId, ownerId)
+      : profiles.findByOwnerId(ownerId);
+    if (!profile || profile.archivedAt) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
+    return profile;
+  };
+
+  app.get("/v1/tasks", (context) => {
+    const owner = currentOwner(context);
+    return context.json({ tasks: safeActions.tasks.list(owner.id).map(publicTask) });
+  });
+
+  app.post("/v1/tasks", async (context) => {
+    const owner = currentOwner(context);
+    const input = z
+      .object({
+        profileId: z.string().optional(),
+        title: z.string().trim().min(1).max(120),
+        description: z.string().trim().max(1_000).default(""),
+        prompt: z.string().trim().min(1).max(4_000),
+        status: z.enum(taskStatuses).default("backlog"),
+      })
+      .parse(await context.req.json());
+    const profile = requireProfile(owner.id, input.profileId);
+    const now = new Date().toISOString();
+    const task = {
+      id: createId("task"),
+      ownerId: owner.id,
+      profileId: profile.id,
+      title: input.title,
+      description: input.description,
+      prompt: input.prompt,
+      status: input.status,
+      position: safeActions.tasks.list(owner.id).filter((item) => item.status === input.status)
+        .length,
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    safeActions.tasks.create(task);
+    return context.json({ task: publicTask(task) }, 201);
+  });
+
+  app.patch("/v1/tasks/:id", async (context) => {
+    const owner = currentOwner(context);
+    const current = safeActions.tasks.find(context.req.param("id"), owner.id);
+    if (!current)
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Task not found", status: 404 });
+    const input = z
+      .object({
+        profileId: z.string().default(current.profileId),
+        title: z.string().trim().min(1).max(120).default(current.title),
+        description: z.string().trim().max(1_000).default(current.description),
+        prompt: z.string().trim().min(1).max(4_000).default(current.prompt),
+        status: z.enum(taskStatuses).default(current.status),
+        position: z.number().int().min(0).max(10_000).default(current.position),
+      })
+      .parse(await context.req.json());
+    requireProfile(owner.id, input.profileId);
+    const task = { ...current, ...input, updatedAt: new Date().toISOString() };
+    safeActions.tasks.update(task);
+    return context.json({ task: publicTask(task) });
+  });
+
+  app.delete("/v1/tasks/:id", (context) => {
+    const owner = currentOwner(context);
+    if (!safeActions.tasks.archive(context.req.param("id"), owner.id, new Date().toISOString())) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Task not found", status: 404 });
+    }
+    return context.body(null, 204);
+  });
+
+  app.post("/v1/tasks/:id/run", (context) => {
+    const owner = currentOwner(context);
+    const task = safeActions.tasks.find(context.req.param("id"), owner.id);
+    if (!task)
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Task not found", status: 404 });
+    const run = safeActions.startTask(task);
+    if (!run)
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Task is already running",
+        status: 409,
+      });
+    return context.json({ run }, 202);
+  });
+
+  app.get("/v1/tasks/:id/runs", (context) => {
+    const owner = currentOwner(context);
+    if (!safeActions.tasks.find(context.req.param("id"), owner.id)) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Task not found", status: 404 });
+    }
+    return context.json({ runs: safeActions.tasks.listRuns(context.req.param("id"), owner.id) });
+  });
+
+  const automationInput = z
+    .object({
+      profileId: z.string().optional(),
+      name: z.string().trim().min(1).max(120),
+      prompt: z.string().trim().min(1).max(4_000),
+      triggerType: z.enum(["manual", "schedule"]),
+      cron: z.string().trim().nullable().default(null),
+      timezone: z.string().trim().min(1).max(80).default("Asia/Jakarta"),
+      enabled: z.boolean().default(false),
+    })
+    .superRefine((value, refinement) => {
+      if (value.triggerType === "manual" && value.cron !== null)
+        refinement.addIssue({
+          code: "custom",
+          path: ["cron"],
+          message: "Manual automation cannot have cron",
+        });
+      if (value.triggerType === "schedule" && (!value.cron || !validCron(value.cron)))
+        refinement.addIssue({
+          code: "custom",
+          path: ["cron"],
+          message: "A valid five-field cron is required",
+        });
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: value.timezone }).format();
+      } catch {
+        refinement.addIssue({ code: "custom", path: ["timezone"], message: "Invalid timezone" });
+      }
+    });
+
+  app.get("/v1/automations", (context) => {
+    const owner = currentOwner(context);
+    return context.json({
+      automations: safeActions.automations.list(owner.id).map(publicAutomation),
+    });
+  });
+
+  app.post("/v1/automations", async (context) => {
+    const owner = currentOwner(context);
+    const input = automationInput.parse(await context.req.json());
+    const profile = requireProfile(owner.id, input.profileId);
+    const now = new Date().toISOString();
+    const automation = {
+      id: createId("automation"),
+      ownerId: owner.id,
+      profileId: profile.id,
+      name: input.name,
+      prompt: input.prompt,
+      triggerType: input.triggerType,
+      cron: input.cron,
+      timezone: input.timezone,
+      enabled: input.enabled,
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    safeActions.automations.create(automation);
+    return context.json({ automation: publicAutomation(automation) }, 201);
+  });
+
+  app.patch("/v1/automations/:id", async (context) => {
+    const owner = currentOwner(context);
+    const current = safeActions.automations.find(context.req.param("id"), owner.id);
+    if (!current)
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Automation not found",
+        status: 404,
+      });
+    const input = automationInput.parse({ ...current, ...(await context.req.json()) });
+    const profile = requireProfile(owner.id, input.profileId ?? current.profileId);
+    const automation = {
+      ...current,
+      ...input,
+      profileId: profile.id,
+      updatedAt: new Date().toISOString(),
+    };
+    safeActions.automations.update(automation);
+    return context.json({ automation: publicAutomation(automation) });
+  });
+
+  app.delete("/v1/automations/:id", (context) => {
+    const owner = currentOwner(context);
+    if (
+      !safeActions.automations.archive(context.req.param("id"), owner.id, new Date().toISOString())
+    ) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Automation not found",
+        status: 404,
+      });
+    }
+    return context.body(null, 204);
+  });
+
+  app.post("/v1/automations/:id/run", (context) => {
+    const owner = currentOwner(context);
+    const automation = safeActions.automations.find(context.req.param("id"), owner.id);
+    if (!automation)
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Automation not found",
+        status: 404,
+      });
+    const run = safeActions.startAutomation(automation);
+    if (!run)
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Automation occurrence already claimed",
+        status: 409,
+      });
+    return context.json({ run }, 202);
+  });
+
+  app.get("/v1/automations/:id/runs", (context) => {
+    const owner = currentOwner(context);
+    if (!safeActions.automations.find(context.req.param("id"), owner.id)) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Automation not found",
+        status: 404,
+      });
+    }
+    return context.json({
+      runs: safeActions.automations.listRuns(context.req.param("id"), owner.id),
+    });
+  });
+
+  app.post("/v1/runs/:id/cancel", (context) => {
+    const owner = currentOwner(context);
+    if (!safeActions.cancel(context.req.param("id"), owner.id)) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Active run not found",
+        status: 404,
+      });
+    }
+    return context.json({ cancelled: true });
+  });
+
+  app.get("/v1/actions", (context) => {
+    const owner = currentOwner(context);
+    return context.json({ actions: actions.list(owner.id) });
+  });
+
+  app.patch("/v1/actions/:id", async (context) => {
+    const owner = currentOwner(context);
+    const input = z
+      .object({ decision: z.enum(["approved", "denied"]) })
+      .parse(await context.req.json());
+    if (
+      !actions.decide(
+        context.req.param("id"),
+        owner.id,
+        input.decision,
+        new Date().toISOString(),
+        createId("actionEvent"),
+      )
+    ) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Action is unavailable or expired",
+        status: 409,
+      });
+    }
+    return context.json({ actions: actions.list(owner.id) });
+  });
+
+  app.get("/v1/mcp-servers", (context) => {
+    const owner = currentOwner(context);
+    return context.json({
+      servers: mcpMetadata.list(owner.id).map(({ cachedToolsJson, ...server }) => ({
+        ...server,
+        cachedTools: JSON.parse(String(cachedToolsJson)),
+      })),
+    });
+  });
+
+  app.post("/v1/mcp-servers", async (context) => {
+    const owner = currentOwner(context);
+    const input = z
+      .object({
+        profileId: z.string().optional(),
+        name: z.string().trim().min(1).max(100),
+        url: z.string().url().max(500),
+        cachedTools: z
+          .array(
+            z.object({
+              name: z.string().min(1).max(100),
+              description: z.string().max(500).default(""),
+            }),
+          )
+          .max(100)
+          .default([]),
+      })
+      .parse(await context.req.json());
+    const profile = requireProfile(owner.id, input.profileId);
+    const url = new URL(input.url);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "MCP metadata requires a clean HTTPS URL",
+        status: 400,
+      });
+    }
+    const now = new Date().toISOString();
+    const server = {
+      id: createId("mcpServer"),
+      ownerId: owner.id,
+      profileId: profile.id,
+      name: input.name,
+      url: url.toString(),
+      cachedToolsJson: JSON.stringify(input.cachedTools),
+      now,
+    };
+    mcpMetadata.create(server);
+    return context.json(
+      {
+        server: {
+          id: server.id,
+          profileId: server.profileId,
+          name: server.name,
+          url: server.url,
+          enabled: false,
+          cachedTools: input.cachedTools,
+        },
+      },
+      201,
+    );
+  });
+
   app.get("/v1/memories", (context) => {
     const owner = currentOwner(context);
     const status = z.enum(memoryStatuses).optional().parse(context.req.query("status"));
@@ -853,6 +1199,16 @@ export function createApp(dependencies: AppDependencies) {
       knowledge: profiles
         .list(owner.id, true)
         .flatMap((profile) => knowledge.listDocuments(owner.id, profile.id)),
+      tasks: safeActions.tasks.list(owner.id).map((task) => ({
+        ...task,
+        runs: safeActions.tasks.listRuns(task.id, owner.id),
+      })),
+      automations: safeActions.automations.list(owner.id).map((automation) => ({
+        ...automation,
+        runs: safeActions.automations.listRuns(automation.id, owner.id),
+      })),
+      actions: actions.list(owner.id),
+      mcpServers: mcpMetadata.list(owner.id),
       sessions: exportedSessions,
     });
   });
@@ -1152,6 +1508,35 @@ export function createApp(dependencies: AppDependencies) {
         delete: operation("Archive an assistant profile", "204"),
       },
       "/v1/models": { get: operation("List configured provider models") },
+      "/v1/tasks": {
+        get: operation("List durable tasks"),
+        post: operation("Create a durable task", "201"),
+      },
+      "/v1/tasks/{id}": {
+        patch: operation("Update a task without executing it"),
+        delete: operation("Archive a task", "204"),
+      },
+      "/v1/tasks/{id}/run": { post: operation("Start a prompt-only task run", "202") },
+      "/v1/tasks/{id}/runs": { get: operation("List task run history") },
+      "/v1/automations": {
+        get: operation("List prompt-only automations"),
+        post: operation("Create a disabled-by-default automation", "201"),
+      },
+      "/v1/automations/{id}": {
+        patch: operation("Update an automation"),
+        delete: operation("Archive an automation", "204"),
+      },
+      "/v1/automations/{id}/run": {
+        post: operation("Start a prompt-only automation run", "202"),
+      },
+      "/v1/automations/{id}/runs": { get: operation("List automation run history") },
+      "/v1/runs/{id}/cancel": { post: operation("Cancel an active prompt run") },
+      "/v1/actions": { get: operation("List durable action proposals") },
+      "/v1/actions/{id}": { patch: operation("Approve or deny an action proposal") },
+      "/v1/mcp-servers": {
+        get: operation("List non-executable MCP metadata"),
+        post: operation("Store non-secret MCP metadata", "201"),
+      },
       "/v1/memories": {
         get: operation("List owner-controlled memories"),
         post: operation("Create an explicit memory", "201"),

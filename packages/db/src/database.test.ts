@@ -7,6 +7,8 @@ import { checkDatabase, openDatabase } from "./database";
 import { migrateDatabase } from "./migrations";
 import {
   AttachmentRepository,
+  ActionRepository,
+  AutomationRepository,
   buildFtsQuery,
   chunkKnowledgeText,
   KnowledgeRepository,
@@ -15,20 +17,21 @@ import {
   OwnerRepository,
   ProfileRepository,
   SessionRepository,
+  TaskRepository,
 } from "./repositories";
 
 describe("database foundation", () => {
   test("applies migrations once and remains healthy", () => {
     const database = openDatabase("file::memory:");
     try {
-      expect(migrateDatabase(database)).toEqual([1, 2, 3, 4]);
+      expect(migrateDatabase(database)).toEqual([1, 2, 3, 4, 5]);
       expect(migrateDatabase(database)).toEqual([]);
       expect(checkDatabase(database)).toBe(true);
       expect(
         database
           .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM schema_migrations")
           .get()?.count,
-      ).toBe(4);
+      ).toBe(5);
       expect(database.query<{ secure_delete: number }, []>("PRAGMA secure_delete").get()).toEqual({
         secure_delete: 1,
       });
@@ -332,6 +335,121 @@ describe("database foundation", () => {
         secondProfileId,
       ]);
       expect(profileRepository.archive(secondProfileId, ownerId, now)).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("claims durable work once and records owner action decisions", () => {
+    const database = openDatabase("file::memory:");
+    migrateDatabase(database);
+    const now = new Date().toISOString();
+    const later = new Date(Date.now() + 60_000).toISOString();
+    const ownerId = createId("owner");
+    const profileId = createId("profile");
+    try {
+      new OwnerRepository(database).create({
+        id: ownerId,
+        email: "actions@example.test",
+        createdAt: now,
+      });
+      new ProfileRepository(database).create({
+        id: profileId,
+        ownerId,
+        name: "Bantuin",
+        systemPrompt: "",
+        providerModel: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      const tasks = new TaskRepository(database);
+      const taskId = createId("task");
+      tasks.create({
+        id: taskId,
+        ownerId,
+        profileId,
+        title: "Ringkas",
+        description: "",
+        prompt: "Ringkas catatan",
+        status: "todo",
+        position: 0,
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const taskRun = {
+        id: createId("taskRun"),
+        status: "running" as const,
+        startedAt: now,
+        completedAt: null,
+        leaseExpiresAt: later,
+        output: null,
+        error: null,
+      };
+      expect(tasks.createRun(taskId, taskRun)).toBe(true);
+      expect(tasks.createRun(taskId, { ...taskRun, id: createId("taskRun") })).toBe(false);
+      expect(tasks.finishRun(taskRun.id, "completed", later, "selesai", null)).toBe(true);
+
+      const automations = new AutomationRepository(database);
+      const automationId = createId("automation");
+      automations.create({
+        id: automationId,
+        ownerId,
+        profileId,
+        name: "Ringkasan harian",
+        prompt: "Ringkas hari ini",
+        triggerType: "manual",
+        cron: null,
+        timezone: "Asia/Jakarta",
+        enabled: false,
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const automationRun = {
+        id: createId("automationRun"),
+        status: "running" as const,
+        startedAt: now,
+        completedAt: null,
+        leaseExpiresAt: later,
+        output: null,
+        error: null,
+      };
+      expect(automations.claimRun(automationId, "manual:one", null, automationRun)).toBe(true);
+      expect(
+        automations.claimRun(automationId, "manual:one", null, {
+          ...automationRun,
+          id: createId("automationRun"),
+        }),
+      ).toBe(false);
+
+      const actions = new ActionRepository(database);
+      const actionId = createId("action");
+      actions.create({
+        id: actionId,
+        ownerId,
+        profileId,
+        sessionId: null,
+        actionName: "internal.note",
+        argumentsJson: '{"text":"halo","token":"secret"}',
+        argumentsHash: "hash",
+        expiresAt: later,
+        now,
+        eventId: createId("actionEvent"),
+      });
+      expect(actions.decide(actionId, ownerId, "approved", now, createId("actionEvent"))).toBe(
+        true,
+      );
+      expect(actions.decide(actionId, ownerId, "denied", now, createId("actionEvent"))).toBe(false);
+      expect(actions.listEvents(actionId, ownerId).map((event) => event.eventType)).toEqual([
+        "proposed",
+        "approved",
+      ]);
+      expect(actions.list(ownerId)[0]?.argumentsJson).toBe('{"text":"halo","token":"[REDACTED]"}');
+      expect(() =>
+        database.query("DELETE FROM action_events WHERE proposal_id = ?").run(actionId),
+      ).toThrow("action events are append-only");
     } finally {
       database.close();
     }

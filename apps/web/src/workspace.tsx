@@ -39,7 +39,38 @@ type Memory = {
 };
 type KnowledgeDocument = { id: string; sourceName: string; bytes: number };
 type ProviderModel = { id: string; name: string };
-type WorkspaceView = "chat" | "history" | "profile" | "system" | "status" | "settings";
+type Task = {
+  id: string;
+  title: string;
+  description: string;
+  prompt: string;
+  status: "backlog" | "todo" | "in_progress" | "done" | "failed";
+};
+type Automation = {
+  id: string;
+  name: string;
+  prompt: string;
+  triggerType: "manual" | "schedule";
+  cron: string | null;
+  timezone: string;
+  enabled: boolean;
+};
+type WorkRun = {
+  id: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  output: string | null;
+  error: string | null;
+  startedAt: string;
+};
+type WorkspaceView =
+  | "chat"
+  | "history"
+  | "profile"
+  | "system"
+  | "tasks"
+  | "automations"
+  | "status"
+  | "settings";
 type SystemStatus = {
   health: { status: "ok"; apiVersion: string; timestamp: string };
   readiness: {
@@ -76,6 +107,13 @@ const navigationGroups: Array<{
       { view: "system", label: "Sistem" },
     ],
   },
+  {
+    label: "Pekerjaan",
+    items: [
+      { view: "tasks", label: "Tasks" },
+      { view: "automations", label: "Automations" },
+    ],
+  },
   { label: "Layanan", items: [{ view: "status", label: "Status" }] },
 ];
 
@@ -83,6 +121,8 @@ const viewTitles: Record<Exclude<WorkspaceView, "chat">, string> = {
   history: "Riwayat",
   profile: "Profil",
   system: "Sistem",
+  tasks: "Tasks",
+  automations: "Automations",
   status: "Status",
   settings: "Pengaturan",
 };
@@ -106,6 +146,18 @@ function NavIcon({ name }: { name: WorkspaceView | "logout" | "collapse" }) {
       <>
         <path d="M9 3h6l1 3 3 1v6l-3 1-1 3H9l-1-3-3-1V7l3-1 1-3Z" />
         <circle cx="12" cy="10" r="2.5" />
+      </>
+    ),
+    tasks: (
+      <>
+        <path d="M5 5h14v14H5z" />
+        <path d="m8 10 2 2 5-5M8 16h8" />
+      </>
+    ),
+    automations: (
+      <>
+        <path d="M7 3v4M17 3v4M4 9h16v11H4z" />
+        <path d="M8 13h3v3H8z" />
       </>
     ),
     status: (
@@ -170,6 +222,9 @@ export function Workspace({
   const [memories, setMemories] = useState<Memory[]>([]);
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [models, setModels] = useState<ProviderModel[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [automations, setAutomations] = useState<Automation[]>([]);
+  const [workRuns, setWorkRuns] = useState<Record<string, WorkRun[]>>({});
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [settingsError, setSettingsError] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -530,10 +585,101 @@ export function Workspace({
     }
   }
 
+  async function loadTasks() {
+    try {
+      setTasks((await api<{ tasks: Task[] }>("/v1/tasks")).tasks);
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Tasks tidak dapat dimuat.");
+    }
+  }
+
+  async function loadAutomations() {
+    try {
+      setAutomations((await api<{ automations: Automation[] }>("/v1/automations")).automations);
+    } catch (caught) {
+      setSettingsError(
+        caught instanceof Error ? caught.message : "Automations tidak dapat dimuat.",
+      );
+    }
+  }
+
+  async function loadRuns(kind: "tasks" | "automations", id: string) {
+    const result = await api<{ runs: WorkRun[] }>(`/v1/${kind}/${id}/runs`);
+    setWorkRuns((current) => ({ ...current, [id]: result.runs }));
+  }
+
+  async function createTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      await api("/v1/tasks", {
+        method: "POST",
+        headers: mutationHeaders,
+        body: JSON.stringify({
+          profileId: selectedProfileId,
+          title: form.get("title"),
+          description: form.get("description"),
+          prompt: form.get("prompt"),
+          status: "backlog",
+        }),
+      });
+      event.currentTarget.reset();
+      await loadTasks();
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Task tidak dapat dibuat.");
+    }
+  }
+
+  async function runWork(kind: "tasks" | "automations", id: string) {
+    try {
+      await api(`/v1/${kind}/${id}/run`, { method: "POST", headers: mutationHeaders });
+      window.setTimeout(() => void loadRuns(kind, id), 250);
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Run tidak dapat dimulai.");
+    }
+  }
+
+  async function archiveWork(kind: "tasks" | "automations", id: string) {
+    try {
+      await api(`/v1/${kind}/${id}`, { method: "DELETE", headers: mutationHeaders });
+      if (kind === "tasks") await loadTasks();
+      else await loadAutomations();
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Item tidak dapat diarsipkan.");
+    }
+  }
+
+  async function createAutomation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const triggerType = String(form.get("triggerType"));
+    try {
+      await api("/v1/automations", {
+        method: "POST",
+        headers: mutationHeaders,
+        body: JSON.stringify({
+          profileId: selectedProfileId,
+          name: form.get("name"),
+          prompt: form.get("prompt"),
+          triggerType,
+          cron: triggerType === "schedule" ? form.get("cron") : null,
+          timezone: "Asia/Jakarta",
+          enabled: form.get("enabled") === "on",
+        }),
+      });
+      event.currentTarget.reset();
+      await loadAutomations();
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Automation tidak dapat dibuat.");
+    }
+  }
+
   function openView(view: WorkspaceView) {
     setActiveView(view);
     setSettingsError("");
     if (view === "system") void loadSystemData();
+    if (view === "tasks") void loadTasks();
+    if (view === "automations") void loadAutomations();
     if (view === "status") void loadStatus();
   }
 
@@ -1137,6 +1283,169 @@ export function Workspace({
                       )}
                     </ul>
                   </section>
+                </div>
+              </>
+            )}
+
+            {activeView === "tasks" && (
+              <>
+                <header className="page-heading">
+                  <p>pekerjaan</p>
+                  <h2>Tasks</h2>
+                  <span>Status tidak pernah menjalankan task; tombol Run selalu eksplisit.</span>
+                </header>
+                {settingsError && (
+                  <p className="form-error" role="alert">
+                    {settingsError}
+                  </p>
+                )}
+                <div className="work-grid">
+                  <form className="settings-section compact-form" onSubmit={createTask}>
+                    <h2>Task baru</h2>
+                    <label>
+                      Judul
+                      <input name="title" required maxLength={120} />
+                    </label>
+                    <label>
+                      Deskripsi
+                      <input name="description" maxLength={1000} />
+                    </label>
+                    <label>
+                      Prompt
+                      <textarea name="prompt" required rows={4} maxLength={4000} />
+                    </label>
+                    <button className="secondary-button" type="submit">
+                      Tambah task
+                    </button>
+                  </form>
+                  <div className="work-list">
+                    {tasks.map((task) => (
+                      <article className="settings-section" key={task.id}>
+                        <div className="section-heading">
+                          <div>
+                            <h2>{task.title}</h2>
+                            <p>{task.description || task.prompt}</p>
+                          </div>
+                          <span>{task.status}</span>
+                        </div>
+                        <div className="row-actions">
+                          <button type="button" onClick={() => void runWork("tasks", task.id)}>
+                            Run
+                          </button>
+                          <button type="button" onClick={() => void loadRuns("tasks", task.id)}>
+                            History
+                          </button>
+                          <button
+                            className="danger-link"
+                            type="button"
+                            onClick={() => void archiveWork("tasks", task.id)}
+                          >
+                            Arsipkan
+                          </button>
+                        </div>
+                        {workRuns[task.id]?.map((run) => (
+                          <div className="run-row" key={run.id}>
+                            <strong>{run.status}</strong>
+                            <span>{run.output ?? run.error ?? "Sedang berjalan…"}</span>
+                          </div>
+                        ))}
+                      </article>
+                    ))}
+                    {tasks.length === 0 && <p className="empty-page">Belum ada task.</p>}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {activeView === "automations" && (
+              <>
+                <header className="page-heading">
+                  <p>pekerjaan</p>
+                  <h2>Automations</h2>
+                  <span>Prompt-only, tanpa shell, JavaScript, atau MCP execution.</span>
+                </header>
+                {settingsError && (
+                  <p className="form-error" role="alert">
+                    {settingsError}
+                  </p>
+                )}
+                <div className="work-grid">
+                  <form className="settings-section compact-form" onSubmit={createAutomation}>
+                    <h2>Automation baru</h2>
+                    <label>
+                      Nama
+                      <input name="name" required maxLength={120} />
+                    </label>
+                    <label>
+                      Prompt
+                      <textarea name="prompt" required rows={4} maxLength={4000} />
+                    </label>
+                    <label>
+                      Trigger
+                      <select name="triggerType" defaultValue="manual">
+                        <option value="manual">Manual</option>
+                        <option value="schedule">Schedule</option>
+                      </select>
+                    </label>
+                    <label>
+                      Cron lima field
+                      <input name="cron" placeholder="0 9 * * 1-5" />
+                    </label>
+                    <label className="check-row">
+                      <input name="enabled" type="checkbox" /> Aktifkan schedule
+                    </label>
+                    <button className="secondary-button" type="submit">
+                      Tambah automation
+                    </button>
+                  </form>
+                  <div className="work-list">
+                    {automations.map((automation) => (
+                      <article className="settings-section" key={automation.id}>
+                        <div className="section-heading">
+                          <div>
+                            <h2>{automation.name}</h2>
+                            <p>{automation.prompt}</p>
+                          </div>
+                          <span>{automation.enabled ? "aktif" : "nonaktif"}</span>
+                        </div>
+                        <p className="work-trigger">
+                          {automation.triggerType === "schedule"
+                            ? `${automation.cron} · ${automation.timezone}`
+                            : "Manual"}
+                        </p>
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            onClick={() => void runWork("automations", automation.id)}
+                          >
+                            Run
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void loadRuns("automations", automation.id)}
+                          >
+                            History
+                          </button>
+                          <button
+                            className="danger-link"
+                            type="button"
+                            onClick={() => void archiveWork("automations", automation.id)}
+                          >
+                            Arsipkan
+                          </button>
+                        </div>
+                        {workRuns[automation.id]?.map((run) => (
+                          <div className="run-row" key={run.id}>
+                            <strong>{run.status}</strong>
+                            <span>{run.output ?? run.error ?? "Sedang berjalan…"}</span>
+                          </div>
+                        ))}
+                      </article>
+                    ))}
+                    {automations.length === 0 && (
+                      <p className="empty-page">Belum ada automation.</p>
+                    )}
+                  </div>
                 </div>
               </>
             )}

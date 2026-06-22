@@ -927,6 +927,49 @@ label small,
   justify-content: space-between;
   gap: 0.75rem;
 }
+.work-grid {
+  display: grid;
+  grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr);
+  gap: 1.25rem;
+}
+.work-grid > form {
+  align-self: start;
+}
+.work-grid h2 {
+  margin: 0;
+  font-size: 0.875rem;
+}
+.work-list {
+  display: grid;
+  gap: 0.75rem;
+}
+.work-trigger {
+  margin: 0.6rem 0;
+  color: var(--text-quiet);
+  font-size: 0.6875rem;
+}
+.run-row {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr);
+  gap: 0.6rem;
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.6875rem;
+}
+.run-row span {
+  overflow-wrap: anywhere;
+  color: var(--text-soft);
+}
+.check-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+}
+.check-row input {
+  width: auto;
+}
 .system-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -935,6 +978,9 @@ label small,
 .settings-section {
   padding: 1.1rem 0;
   border-top: 1px solid var(--border);
+}
+.work-list .settings-section {
+  padding: 1rem;
 }
 .settings-section h2 {
   margin: 0 0 0.7rem;
@@ -1216,6 +1262,9 @@ label small,
     gap: 1rem;
   }
   .profile-manager {
+    grid-template-columns: 1fr;
+  }
+  .work-grid {
     grid-template-columns: 1fr;
   }
   .profile-list {

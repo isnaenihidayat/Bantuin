@@ -3,6 +3,7 @@ import initialMigration from "../migrations/0001_initial.sql";
 import coreChatMigration from "../migrations/0002_core_chat.sql";
 import memoryKnowledgeMigration from "../migrations/0003_memory_knowledge.sql";
 import assistantCapabilitiesMigration from "../migrations/0004_assistant_capabilities.sql";
+import safeActionsMigration from "../migrations/0005_safe_actions.sql";
 
 type Migration = {
   version: number;
@@ -30,6 +31,11 @@ const migrations: Migration[] = [
     version: 4,
     name: "assistant_capabilities",
     sql: assistantCapabilitiesMigration,
+  },
+  {
+    version: 5,
+    name: "safe_actions",
+    sql: safeActionsMigration,
   },
 ];
 

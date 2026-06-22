@@ -3,7 +3,7 @@
 Date: 22-06-26
 Complexity: Complex — phase program
 Approval: ✅ Approved by user on 22-06-26
-Status: 🔨 ACTIVE — Phases 01–02 verified; Phase 03 research is next
+Status: 🔨 ACTIVE — Phases 01–03 verified; Phase 04 research next
 
 ## Context and Goals
 
@@ -55,7 +55,7 @@ Out of scope:
 | --- | --- | --- | --- | --- |
 | 01 | `TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_PLAN_22-06-26.md` | Replace the current approximation with a faithful functional web experience | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_REPORT.md` |
 | 02 | `TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_PLAN_22-06-26.md` | Profiles, rich chat, model choice, files, knowledge, thinking, branching | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_REPORT.md` |
-| 03 | `TINYCLAW_CLONE_PHASE_03_ACTIONS_PLAN_22-06-26.md` | Safe tools, MCP, automations, tasks, run history | ⏳ PLANNED | `reports/TINYCLAW_CLONE_PHASE_03_ACTIONS_REPORT.md` |
+| 03 | `TINYCLAW_CLONE_PHASE_03_ACTIONS_PLAN_22-06-26.md` | Safe tools, MCP, automations, tasks, run history | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_03_SAFE_ACTIONS_REPORT.md` |
 | 04 | `TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_PLAN_22-06-26.md` | CLI, Telegram, WhatsApp, operations, backup, Docker, release | ⏳ PLANNED | `reports/TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_REPORT.md` |
 
 Only one phase may be active. Research and approval for the next phase begin only after the current phase is ✅ VERIFIED.
@@ -117,8 +117,8 @@ After each phase, rerun the full Bantuin gate, exercise the complete user flow, 
 
 - [x] Approve this umbrella and Phase 01 scope.
 - [x] Complete and verify Phase 01 before Phase 02.
-- [ ] Complete and verify Phase 02 before Phase 03.
-- [ ] Approve the security contract, then complete and verify Phase 03.
+- [x] Complete and verify Phase 02 before Phase 03.
+- [x] Approve the security contract, then complete and verify Phase 03.
 - [ ] Approve channel credentials/order, then complete and verify Phase 04.
 - [ ] Run final cross-phase regression, recovery, provenance, and release review.
 - [ ] Receive final approval before commit, push, or release.

@@ -191,6 +191,39 @@ export class ProfileRepository {
     return this.list(ownerId, true).find((profile) => profile.id === id) ?? null;
   }
 
+  findById(id: string): ProfileRecord | null {
+    const row = this.#database
+      .query<
+        {
+          id: string;
+          owner_id: string;
+          name: string;
+          system_prompt: string;
+          provider_model: string | null;
+          archived_at: string | null;
+          created_at: string;
+          updated_at: string;
+        },
+        [string]
+      >(
+        `SELECT id, owner_id, name, system_prompt, provider_model, archived_at, created_at, updated_at
+         FROM profiles WHERE id = ?`,
+      )
+      .get(id);
+    return row
+      ? {
+          id: row.id,
+          ownerId: row.owner_id,
+          name: row.name,
+          systemPrompt: row.system_prompt,
+          providerModel: row.provider_model,
+          archivedAt: row.archived_at,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }
+      : null;
+  }
+
   list(ownerId: string, includeArchived = false): ProfileRecord[] {
     return this.#database
       .query<
@@ -1163,5 +1196,546 @@ export class KnowledgeRepository {
     this.#database.exec(
       "INSERT INTO knowledge_chunks_fts(knowledge_chunks_fts, rank) VALUES ('integrity-check', 1)",
     );
+  }
+}
+
+export type WorkStatus = "backlog" | "todo" | "in_progress" | "done" | "failed";
+export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+
+export type TaskRecord = {
+  id: string;
+  ownerId: string;
+  profileId: string;
+  title: string;
+  description: string;
+  prompt: string;
+  status: WorkStatus;
+  position: number;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RunRecord = {
+  id: string;
+  status: RunStatus;
+  startedAt: string;
+  completedAt: string | null;
+  leaseExpiresAt: string;
+  output: string | null;
+  error: string | null;
+};
+
+function toTask(row: Record<string, unknown>): TaskRecord {
+  return {
+    id: String(row.id),
+    ownerId: String(row.owner_id),
+    profileId: String(row.profile_id),
+    title: String(row.title),
+    description: String(row.description),
+    prompt: String(row.prompt),
+    status: row.status as WorkStatus,
+    position: Number(row.position),
+    archivedAt: (row.archived_at as string | null) ?? null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function toRun(row: Record<string, unknown>): RunRecord {
+  return {
+    id: String(row.id),
+    status: row.status as RunStatus,
+    startedAt: String(row.started_at),
+    completedAt: (row.completed_at as string | null) ?? null,
+    leaseExpiresAt: String(row.lease_expires_at),
+    output: (row.output as string | null) ?? null,
+    error: (row.error as string | null) ?? null,
+  };
+}
+
+export class TaskRepository {
+  constructor(readonly database: BantuinDatabase) {}
+
+  create(task: TaskRecord): void {
+    this.database
+      .query(
+        `INSERT INTO tasks(id, owner_id, profile_id, title, description, prompt, status, position,
+                           archived_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        task.id,
+        task.ownerId,
+        task.profileId,
+        task.title,
+        task.description,
+        task.prompt,
+        task.status,
+        task.position,
+        task.archivedAt,
+        task.createdAt,
+        task.updatedAt,
+      );
+  }
+
+  list(ownerId: string): TaskRecord[] {
+    return this.database
+      .query<Record<string, unknown>, [string]>(
+        `SELECT * FROM tasks WHERE owner_id = ? AND archived_at IS NULL
+         ORDER BY status, position, created_at`,
+      )
+      .all(ownerId)
+      .map(toTask);
+  }
+
+  find(id: string, ownerId: string): TaskRecord | null {
+    const row = this.database
+      .query<Record<string, unknown>, [string, string]>(
+        "SELECT * FROM tasks WHERE id = ? AND owner_id = ? AND archived_at IS NULL",
+      )
+      .get(id, ownerId);
+    return row ? toTask(row) : null;
+  }
+
+  update(task: TaskRecord): boolean {
+    return (
+      Number(
+        this.database
+          .query(
+            `UPDATE tasks SET profile_id = ?, title = ?, description = ?, prompt = ?, status = ?,
+                              position = ?, updated_at = ?
+             WHERE id = ? AND owner_id = ? AND archived_at IS NULL`,
+          )
+          .run(
+            task.profileId,
+            task.title,
+            task.description,
+            task.prompt,
+            task.status,
+            task.position,
+            task.updatedAt,
+            task.id,
+            task.ownerId,
+          ).changes,
+      ) === 1
+    );
+  }
+
+  archive(id: string, ownerId: string, now: string): boolean {
+    return (
+      Number(
+        this.database
+          .query(
+            "UPDATE tasks SET archived_at = ?, updated_at = ? WHERE id = ? AND owner_id = ? AND archived_at IS NULL",
+          )
+          .run(now, now, id, ownerId).changes,
+      ) === 1
+    );
+  }
+
+  createRun(taskId: string, run: RunRecord): boolean {
+    const active = this.database
+      .query<{ value: number }, [string]>(
+        "SELECT 1 AS value FROM task_runs WHERE task_id = ? AND status = 'running'",
+      )
+      .get(taskId);
+    if (active) return false;
+    this.database
+      .query(
+        `INSERT INTO task_runs(id, task_id, status, started_at, completed_at, lease_expires_at, output, error)
+         VALUES (?, ?, 'running', ?, NULL, ?, NULL, NULL)`,
+      )
+      .run(run.id, taskId, run.startedAt, run.leaseExpiresAt);
+    return true;
+  }
+
+  listRuns(taskId: string, ownerId: string): RunRecord[] {
+    return this.database
+      .query<Record<string, unknown>, [string, string]>(
+        `SELECT task_runs.* FROM task_runs JOIN tasks ON tasks.id = task_runs.task_id
+         WHERE task_id = ? AND tasks.owner_id = ? ORDER BY started_at DESC LIMIT 50`,
+      )
+      .all(taskId, ownerId)
+      .map(toRun);
+  }
+
+  finishRun(
+    id: string,
+    status: Exclude<RunStatus, "running">,
+    now: string,
+    output: string | null,
+    error: string | null,
+  ): boolean {
+    return (
+      Number(
+        this.database
+          .query(
+            `UPDATE task_runs SET status = ?, completed_at = ?, output = ?, error = ?
+       WHERE id = ? AND status = 'running'`,
+          )
+          .run(status, now, output, error, id).changes,
+      ) === 1
+    );
+  }
+
+  recoverExpired(now: string): number {
+    return Number(
+      this.database
+        .query(
+          `UPDATE task_runs SET status = 'failed', completed_at = ?, error = 'RUN_LEASE_EXPIRED'
+       WHERE status = 'running' AND lease_expires_at <= ?`,
+        )
+        .run(now, now).changes,
+    );
+  }
+}
+
+export type AutomationRecord = {
+  id: string;
+  ownerId: string;
+  profileId: string;
+  name: string;
+  prompt: string;
+  triggerType: "manual" | "schedule";
+  cron: string | null;
+  timezone: string;
+  enabled: boolean;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function toAutomation(row: Record<string, unknown>): AutomationRecord {
+  return {
+    id: String(row.id),
+    ownerId: String(row.owner_id),
+    profileId: String(row.profile_id),
+    name: String(row.name),
+    prompt: String(row.prompt),
+    triggerType: row.trigger_type as "manual" | "schedule",
+    cron: (row.cron as string | null) ?? null,
+    timezone: String(row.timezone),
+    enabled: Boolean(row.enabled),
+    archivedAt: (row.archived_at as string | null) ?? null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export class AutomationRepository {
+  constructor(readonly database: BantuinDatabase) {}
+
+  create(item: AutomationRecord): void {
+    this.database
+      .query(
+        `INSERT INTO automations(id, owner_id, profile_id, name, prompt, trigger_type, cron, timezone,
+                               enabled, archived_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        item.id,
+        item.ownerId,
+        item.profileId,
+        item.name,
+        item.prompt,
+        item.triggerType,
+        item.cron,
+        item.timezone,
+        item.enabled ? 1 : 0,
+        item.archivedAt,
+        item.createdAt,
+        item.updatedAt,
+      );
+  }
+
+  list(ownerId: string): AutomationRecord[] {
+    return this.database
+      .query<Record<string, unknown>, [string]>(
+        "SELECT * FROM automations WHERE owner_id = ? AND archived_at IS NULL ORDER BY updated_at DESC",
+      )
+      .all(ownerId)
+      .map(toAutomation);
+  }
+
+  listScheduled(): AutomationRecord[] {
+    return this.database
+      .query<Record<string, unknown>, []>(
+        `SELECT * FROM automations WHERE enabled = 1 AND trigger_type = 'schedule'
+         AND archived_at IS NULL ORDER BY updated_at`,
+      )
+      .all()
+      .map(toAutomation);
+  }
+
+  find(id: string, ownerId: string): AutomationRecord | null {
+    const row = this.database
+      .query<Record<string, unknown>, [string, string]>(
+        "SELECT * FROM automations WHERE id = ? AND owner_id = ? AND archived_at IS NULL",
+      )
+      .get(id, ownerId);
+    return row ? toAutomation(row) : null;
+  }
+
+  update(item: AutomationRecord): boolean {
+    return (
+      Number(
+        this.database
+          .query(
+            `UPDATE automations SET profile_id = ?, name = ?, prompt = ?, trigger_type = ?, cron = ?,
+                              timezone = ?, enabled = ?, updated_at = ?
+       WHERE id = ? AND owner_id = ? AND archived_at IS NULL`,
+          )
+          .run(
+            item.profileId,
+            item.name,
+            item.prompt,
+            item.triggerType,
+            item.cron,
+            item.timezone,
+            item.enabled ? 1 : 0,
+            item.updatedAt,
+            item.id,
+            item.ownerId,
+          ).changes,
+      ) === 1
+    );
+  }
+
+  archive(id: string, ownerId: string, now: string): boolean {
+    return (
+      Number(
+        this.database
+          .query(
+            "UPDATE automations SET archived_at = ?, enabled = 0, updated_at = ? WHERE id = ? AND owner_id = ? AND archived_at IS NULL",
+          )
+          .run(now, now, id, ownerId).changes,
+      ) === 1
+    );
+  }
+
+  claimRun(
+    automationId: string,
+    occurrenceKey: string,
+    scheduledFor: string | null,
+    run: RunRecord,
+  ): boolean {
+    try {
+      return this.database
+        .transaction(() => {
+          const active = this.database
+            .query<{ value: number }, [string]>(
+              "SELECT 1 AS value FROM automation_runs WHERE automation_id = ? AND status = 'running'",
+            )
+            .get(automationId);
+          if (active) return false;
+          this.database
+            .query(
+              `INSERT INTO automation_runs(id, automation_id, occurrence_key, scheduled_for, status,
+                                           started_at, completed_at, lease_expires_at, output, error)
+               VALUES (?, ?, ?, ?, 'running', ?, NULL, ?, NULL, NULL)`,
+            )
+            .run(
+              run.id,
+              automationId,
+              occurrenceKey,
+              scheduledFor,
+              run.startedAt,
+              run.leaseExpiresAt,
+            );
+          return true;
+        })
+        .immediate();
+    } catch (error) {
+      if (String(error).includes("UNIQUE constraint failed")) return false;
+      throw error;
+    }
+  }
+
+  listRuns(automationId: string, ownerId: string): RunRecord[] {
+    return this.database
+      .query<Record<string, unknown>, [string, string]>(
+        `SELECT automation_runs.* FROM automation_runs JOIN automations ON automations.id = automation_runs.automation_id
+       WHERE automation_id = ? AND automations.owner_id = ? ORDER BY started_at DESC LIMIT 50`,
+      )
+      .all(automationId, ownerId)
+      .map(toRun);
+  }
+
+  finishRun(
+    id: string,
+    status: Exclude<RunStatus, "running">,
+    now: string,
+    output: string | null,
+    error: string | null,
+  ): boolean {
+    return (
+      Number(
+        this.database
+          .query(
+            `UPDATE automation_runs SET status = ?, completed_at = ?, output = ?, error = ?
+       WHERE id = ? AND status = 'running'`,
+          )
+          .run(status, now, output, error, id).changes,
+      ) === 1
+    );
+  }
+
+  recoverExpired(now: string): number {
+    return Number(
+      this.database
+        .query(
+          `UPDATE automation_runs SET status = 'failed', completed_at = ?, error = 'RUN_LEASE_EXPIRED'
+       WHERE status = 'running' AND lease_expires_at <= ?`,
+        )
+        .run(now, now).changes,
+    );
+  }
+}
+
+export type ActionStatus =
+  | "proposed"
+  | "approved"
+  | "denied"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+function redactActionArguments(value: string): string {
+  return value
+    .replaceAll(
+      /("(?:api[_-]?key|password|token|authorization)"\s*:\s*)"[^"]*"/giu,
+      '$1"[REDACTED]"',
+    )
+    .replaceAll(/(bearer\s+)[a-z0-9._~+/-]+/giu, "$1[REDACTED]");
+}
+
+export class ActionRepository {
+  constructor(readonly database: BantuinDatabase) {}
+
+  create(input: {
+    id: string;
+    ownerId: string;
+    profileId: string;
+    sessionId: string | null;
+    actionName: string;
+    argumentsJson: string;
+    argumentsHash: string;
+    expiresAt: string;
+    now: string;
+    eventId: string;
+  }): void {
+    this.database.transaction(() => {
+      this.database
+        .query(
+          `INSERT INTO action_proposals(id, owner_id, profile_id, session_id, action_name, arguments_json,
+          arguments_hash, status, expires_at, decided_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, NULL, ?, ?)`,
+        )
+        .run(
+          input.id,
+          input.ownerId,
+          input.profileId,
+          input.sessionId,
+          input.actionName,
+          redactActionArguments(input.argumentsJson),
+          input.argumentsHash,
+          input.expiresAt,
+          input.now,
+          input.now,
+        );
+      this.database
+        .query(
+          "INSERT INTO action_events(id, proposal_id, event_type, actor, detail, created_at) VALUES (?, ?, 'proposed', 'system', NULL, ?)",
+        )
+        .run(input.eventId, input.id, input.now);
+    })();
+  }
+
+  decide(
+    id: string,
+    ownerId: string,
+    decision: "approved" | "denied",
+    now: string,
+    eventId: string,
+  ): boolean {
+    return this.database.transaction(() => {
+      const changed = Number(
+        this.database
+          .query(
+            `UPDATE action_proposals SET status = ?, decided_at = ?, updated_at = ?
+         WHERE id = ? AND owner_id = ? AND status = 'proposed' AND expires_at > ?`,
+          )
+          .run(decision, now, now, id, ownerId, now).changes,
+      );
+      if (!changed) return false;
+      this.database
+        .query(
+          "INSERT INTO action_events(id, proposal_id, event_type, actor, detail, created_at) VALUES (?, ?, ?, 'owner', NULL, ?)",
+        )
+        .run(eventId, id, decision, now);
+      return true;
+    })();
+  }
+
+  list(ownerId: string): Array<Record<string, unknown>> {
+    return this.database
+      .query<Record<string, unknown>, [string]>(
+        `SELECT id, profile_id AS profileId, session_id AS sessionId, action_name AS actionName,
+              arguments_json AS argumentsJson, arguments_hash AS argumentsHash, status,
+              expires_at AS expiresAt, decided_at AS decidedAt, created_at AS createdAt,
+              updated_at AS updatedAt
+       FROM action_proposals WHERE owner_id = ? ORDER BY created_at DESC LIMIT 100`,
+      )
+      .all(ownerId);
+  }
+
+  listEvents(id: string, ownerId: string): Array<Record<string, unknown>> {
+    return this.database
+      .query<Record<string, unknown>, [string, string]>(
+        `SELECT action_events.id, event_type AS eventType, actor, detail, action_events.created_at AS createdAt
+       FROM action_events JOIN action_proposals ON action_proposals.id = action_events.proposal_id
+       WHERE proposal_id = ? AND action_proposals.owner_id = ? ORDER BY action_events.created_at`,
+      )
+      .all(id, ownerId);
+  }
+}
+
+export class McpMetadataRepository {
+  constructor(readonly database: BantuinDatabase) {}
+  create(input: {
+    id: string;
+    ownerId: string;
+    profileId: string;
+    name: string;
+    url: string;
+    cachedToolsJson: string;
+    now: string;
+  }): void {
+    this.database
+      .query(
+        `INSERT INTO mcp_server_metadata(id, owner_id, profile_id, name, url, enabled, cached_tools_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      )
+      .run(
+        input.id,
+        input.ownerId,
+        input.profileId,
+        input.name,
+        input.url,
+        input.cachedToolsJson,
+        input.now,
+        input.now,
+      );
+  }
+  list(ownerId: string): Array<Record<string, unknown>> {
+    return this.database
+      .query<Record<string, unknown>, [string]>(
+        `SELECT id, profile_id AS profileId, name, url, enabled, cached_tools_json AS cachedToolsJson,
+              created_at AS createdAt, updated_at AS updatedAt
+       FROM mcp_server_metadata WHERE owner_id = ? ORDER BY name`,
+      )
+      .all(ownerId);
   }
 }
