@@ -36,6 +36,7 @@ export type ChatStreamEvent =
 
 export interface ModelProvider {
   readonly id: string;
+  contextWindowTokens?(): Promise<number>;
   streamChat(
     request: ChatRequest,
     options?: { signal?: AbortSignal },

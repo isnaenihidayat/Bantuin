@@ -59,6 +59,21 @@ class CancelThenCompleteProvider implements ModelProvider {
   }
 }
 
+class CapturingProvider implements ModelProvider {
+  readonly id = "capturing";
+  requests: ChatRequest[] = [];
+
+  contextWindowTokens(): Promise<number> {
+    return Promise.resolve(4_096);
+  }
+
+  async *streamChat(request: ChatRequest): AsyncIterable<ChatStreamEvent> {
+    this.requests.push(request);
+    yield { type: "message.delta", delta: "Cuti tahunan adalah 12 hari." };
+    yield { type: "message.completed", finishReason: "stop" };
+  }
+}
+
 describe("foundation API", () => {
   test("reports health and readiness", async () => {
     const app = testApp();
@@ -393,5 +408,177 @@ describe("core chat authentication", () => {
       { role: "assistant", status: "cancelled", content: "Sebagian" },
       { role: "assistant", status: "completed", content: "Selesai" },
     ]);
+  });
+
+  test("manages explicit memory, cites local knowledge, and exports owner data safely", async () => {
+    const provider = new CapturingProvider();
+    const app = testApp(provider);
+    const setup = await app.request("/v1/setup", {
+      method: "POST",
+      headers: mutationHeaders,
+      body: JSON.stringify({
+        email: "owner@example.test",
+        password: "correct horse battery staple",
+      }),
+    });
+    const cookie = setup.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+    const headers = { ...mutationHeaders, cookie };
+
+    const createdMemory = await app.request("/v1/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ type: "preference", content: "Panggil saya Isnaeni" }),
+    });
+    const { memory } = (await createdMemory.json()) as { memory: { id: string } };
+    expect(createdMemory.status).toBe(201);
+
+    const createdKnowledge = await app.request("/v1/knowledge", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        sourceName: "kebijakan.md",
+        content: "Kebijakan cuti tahunan adalah 12 hari.",
+      }),
+    });
+    const { document } = (await createdKnowledge.json()) as { document: { id: string } };
+    expect(createdKnowledge.status).toBe(201);
+    expect(
+      (
+        await app.request("/v1/knowledge", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            sourceName: "salinan.md",
+            content: "Kebijakan cuti tahunan adalah 12 hari.",
+          }),
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await app.request("/v1/knowledge", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ sourceName: "data.pdf", content: "teks" }),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request("/v1/knowledge", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ sourceName: "besar.txt", content: "x".repeat(1024 * 1024 + 1) }),
+        })
+      ).status,
+    ).toBe(413);
+
+    const createdSession = await app.request("/v1/sessions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Memory test" }),
+    });
+    const { session } = (await createdSession.json()) as { session: { id: string } };
+    const response = await app.request(`/v1/sessions/${session.id}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        message: "Berapa cuti tahunan?",
+        clientRequestId: "memory-request-1",
+      }),
+    });
+    const stream = await response.text();
+    expect(stream).toContain("context.sources");
+    expect(stream).toContain("kebijakan.md");
+    expect(
+      provider.requests[0]?.messages.some((message) => message.content.includes("Isnaeni")),
+    ).toBe(true);
+    expect(
+      provider.requests[0]?.messages.some((message) =>
+        message.content.includes("data tidak tepercaya"),
+      ),
+    ).toBe(true);
+    expect(provider.requests[0]?.maxTokens).toBe(1_024);
+
+    await app.request(`/v1/memories/${memory.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ status: "archived" }),
+    });
+    const askInNewSession = async (message: string, clientRequestId: string) => {
+      const created = await app.request("/v1/sessions", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ title: "Recall check" }),
+      });
+      const body = (await created.json()) as { session: { id: string } };
+      return app.request(`/v1/sessions/${body.session.id}/messages`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ message, clientRequestId }),
+      });
+    };
+    await (await askInNewSession("Siapa nama saya?", "memory-request-2")).text();
+    expect(
+      provider.requests
+        .at(-1)
+        ?.messages.some((message) => message.content.includes("Panggil saya")),
+    ).toBe(false);
+
+    await app.request(`/v1/memories/${memory.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ status: "active", content: "Panggil saya Neni" }),
+    });
+    await (await askInNewSession("Siapa nama saya?", "memory-request-3")).text();
+    expect(
+      provider.requests.at(-1)?.messages.some((message) => message.content.includes("Neni")),
+    ).toBe(true);
+
+    const history = (await (
+      await app.request(`/v1/sessions/${session.id}/messages`, { headers: { cookie } })
+    ).json()) as { messages: Array<{ sources: Array<{ sourceName: string }> }> };
+    expect(history.messages.at(-1)?.sources).toEqual([
+      expect.objectContaining({ sourceName: "kebijakan.md" }),
+    ]);
+
+    const exported = await app.request("/v1/export", { headers: { cookie } });
+    const exportText = await exported.text();
+    expect(exported.status).toBe(200);
+    expect(exportText).toContain("Panggil saya Neni");
+    expect(exportText).not.toContain("Panggil saya Isnaeni");
+    expect(exportText).toContain("Kebijakan cuti tahunan");
+    expect(exportText).not.toContain("passwordHash");
+    expect(exportText).not.toContain("tokenHash");
+    expect(exportText).not.toContain("apiKey");
+
+    expect(
+      (
+        await app.request(`/v1/memories/${memory.id}`, {
+          method: "DELETE",
+          headers,
+        })
+      ).status,
+    ).toBe(204);
+    await (await askInNewSession("Siapa nama saya?", "memory-request-4")).text();
+    expect(
+      provider.requests.at(-1)?.messages.some((message) => message.content.includes("Neni")),
+    ).toBe(false);
+    expect(
+      (
+        await app.request(`/v1/knowledge/${document.id}`, {
+          method: "DELETE",
+          headers,
+        })
+      ).status,
+    ).toBe(204);
+    const afterKnowledgeDelete = await askInNewSession("Berapa cuti tahunan?", "memory-request-5");
+    expect(await afterKnowledgeDelete.text()).not.toContain("context.sources");
+    expect(await (await app.request("/v1/memories", { headers: { cookie } })).json()).toEqual({
+      memories: [],
+    });
+    expect(await (await app.request("/v1/knowledge", { headers: { cookie } })).json()).toEqual({
+      documents: [],
+    });
   });
 });

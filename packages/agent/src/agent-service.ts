@@ -7,6 +7,10 @@ export class AgentService {
     this.#provider = provider;
   }
 
+  contextWindowTokens(): Promise<number> {
+    return this.#provider.contextWindowTokens?.() ?? Promise.resolve(8_192);
+  }
+
   streamReply(
     request: ChatRequest,
     options?: { signal?: AbortSignal },

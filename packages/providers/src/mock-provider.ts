@@ -3,6 +3,10 @@ import type { ChatRequest, ChatStreamEvent, ModelProvider } from "@bantuin/core"
 export class MockProvider implements ModelProvider {
   readonly id = "mock";
 
+  contextWindowTokens(): Promise<number> {
+    return Promise.resolve(8_192);
+  }
+
   async *streamChat(
     request: ChatRequest,
     options: { signal?: AbortSignal } = {},

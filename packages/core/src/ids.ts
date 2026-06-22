@@ -3,6 +3,9 @@ const prefixes = {
   profile: "pro",
   session: "ses",
   message: "msg",
+  memory: "mem",
+  document: "doc",
+  chunk: "chk",
   request: "req",
 } as const;
 

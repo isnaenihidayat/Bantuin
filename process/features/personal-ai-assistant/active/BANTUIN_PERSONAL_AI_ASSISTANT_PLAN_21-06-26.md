@@ -203,7 +203,7 @@ Every user-owned row has `owner_id`; messages have `(session_id, sequence)` uniq
 | --- | --- | --- | --- | --- |
 | 1 | Weeks 1–2 | ✅ VERIFIED | `SPRINT_01_FOUNDATION_PLAN_21-06-26.md` | `reports/SPRINT_01_FOUNDATION_REPORT.md` |
 | 2 | Weeks 3–4 | ✅ VERIFIED | `SPRINT_02_CORE_CHAT_PLAN_21-06-26.md` | `reports/SPRINT_02_CORE_CHAT_REPORT.md` |
-| 3 | Weeks 5–6 | ⏳ PLANNED | `SPRINT_03_MEMORY_PLAN_21-06-26.md` | `reports/SPRINT_03_MEMORY_REPORT.md` |
+| 3 | Weeks 5–6 | 🧪 VERIFYING | `SPRINT_03_MEMORY_PLAN_21-06-26.md` | `reports/SPRINT_03_MEMORY_REPORT.md` |
 | 4 | Weeks 7–8 | ⏳ PLANNED | `SPRINT_04_TOOLS_AUTOMATIONS_PLAN_21-06-26.md` | `reports/SPRINT_04_TOOLS_AUTOMATIONS_REPORT.md` |
 | 5 | Weeks 9–10 | ⏳ PLANNED | `SPRINT_05_CHANNELS_PLAN_21-06-26.md` | `reports/SPRINT_05_CHANNELS_REPORT.md` |
 | 6 | Weeks 11–12 | ⏳ PLANNED | `SPRINT_06_HARDENING_RELEASE_PLAN_21-06-26.md` | `reports/SPRINT_06_HARDENING_RELEASE_REPORT.md` |

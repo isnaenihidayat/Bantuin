@@ -2,7 +2,7 @@
 
 Date: 21-06-26  
 Complexity: Complex phase 3/6  
-Status: ⏳ PLANNED  
+Status: 🧪 VERIFYING — automated checks complete; manual/user confirmation pending
 Objective: add inspectable, correctable, reversible memory and source-grounded personal knowledge.
 
 ## Context
@@ -24,7 +24,7 @@ Measure real context limits; decide memory extraction policy, consent, retention
 ## Implementation Stages
 
 1. Curated memory model with type, content, source message, confidence, timestamps, and status.
-2. Explicit remember/forget/edit UI and safe assistant memory tool.
+2. Explicit remember/forget/edit UI; automatic and model-initiated writes stay prohibited.
 3. Knowledge document ingestion, extraction limits, chunking, search, and citations/provenance.
 4. Context assembly budgets and history compaction without erasing source history.
 5. Export and cascading deletion workflows.
@@ -72,13 +72,14 @@ Personalization improves continuity while the owner retains visibility and contr
 
 ## Implementation Checklist
 
-- [ ] Research memory/retention/search choices and receive approval
-- [ ] Add memory schema/repository and tests
-- [ ] Add explicit memory tool and approval rules
-- [ ] Add knowledge ingestion/search with provenance tests
-- [ ] Add context budget/compaction tests
-- [ ] Add inspect/edit/delete/export UI and E2E
-- [ ] Run privacy/deletion verification
+- [x] Research memory/retention/search choices and receive approval
+- [x] Add memory schema/repository and tests
+- [x] Add explicit owner memory UI; prohibit automatic/model writes
+- [x] Add knowledge ingestion/search with provenance tests
+- [x] Add context budget/compaction tests
+- [x] Add inspect/edit/delete/export UI and API integration
+- [x] Run automated privacy/deletion verification
+- [ ] Complete manual browser visual verification
 - [ ] Receive confirmation and commit/push `feat/sprint-3-memory`
 
 ## Resume and Execution Handoff

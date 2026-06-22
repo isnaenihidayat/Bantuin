@@ -1,4 +1,4 @@
-import type { AgentService } from "@bantuin/agent";
+import { type AgentService, assembleContext } from "@bantuin/agent";
 import { encodeSseFrame } from "@bantuin/client";
 import {
   BANTUIN_API_VERSION,
@@ -9,10 +9,15 @@ import {
 } from "@bantuin/core";
 import {
   AuthRepository,
+  chunkKnowledgeText,
   checkDatabase,
   type BantuinDatabase,
+  KnowledgeRepository,
   MessageRepository,
   type MessageRecord,
+  MemoryRepository,
+  type MemoryStatus,
+  type MemoryType,
   ProfileRepository,
   SessionRepository,
 } from "@bantuin/db";
@@ -32,6 +37,9 @@ type AppContext = Context<{ Variables: Variables }>;
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 const LOGIN_WINDOW_MS = 5 * 60 * 1_000;
 const LOGIN_MAX_FAILURES = 5;
+const KNOWLEDGE_MAX_BYTES = 1024 * 1024;
+const memoryTypes = ["preference", "fact", "goal", "note"] as const;
+const memoryStatuses = ["active", "archived"] as const;
 
 function createSessionToken(): string {
   return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
@@ -94,6 +102,8 @@ export function createApp(dependencies: AppDependencies) {
   const profiles = new ProfileRepository(dependencies.database);
   const sessions = new SessionRepository(dependencies.database);
   const messageRepository = new MessageRepository(dependencies.database);
+  const memories = new MemoryRepository(dependencies.database);
+  const knowledge = new KnowledgeRepository(dependencies.database);
   const activeStreams = new Map<string, AbortController>();
   // ponytail: single-process limiter; move to shared storage before horizontal deployment.
   const loginFailures = new Map<string, { count: number; resetAt: number }>();
@@ -135,11 +145,27 @@ export function createApp(dependencies: AppDependencies) {
     return owner;
   }
 
+  function publicSources(messageId: string) {
+    return knowledge
+      .listMessageSources(messageId)
+      .map(({ chunkId, documentId, sourceName, ordinal }) => ({
+        chunkId,
+        documentId,
+        sourceName,
+        ordinal,
+      }));
+  }
+
+  function checkpointDeletedContent(): void {
+    dependencies.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
   function streamAssistant(
     context: AppContext,
     assistant: MessageRecord,
     created: boolean,
   ): Response {
+    const owner = currentOwner(context);
     const requestId = context.get("requestId");
     const encoder = new TextEncoder();
     const abortController = new AbortController();
@@ -168,20 +194,43 @@ export function createApp(dependencies: AppDependencies) {
             return;
           }
 
-          const profile = profiles.findByOwnerId(currentOwner(context).id);
+          const profile = profiles.findByOwnerId(owner.id);
           const history = messageRepository
             .list(assistant.sessionId)
             .filter((message) => message.id !== assistant.id && message.status === "completed")
             .map((message) => ({ role: message.role, content: message.content }));
-          const providerMessages = [
-            ...(profile?.systemPrompt
-              ? [{ role: "system" as const, content: profile.systemPrompt }]
-              : []),
-            ...history,
-          ];
+          const query = history.findLast((message) => message.role === "user")?.content ?? "";
+          const foundSources = knowledge.search(owner.id, query, 5);
+          const contextWindowTokens = await dependencies.agent.contextWindowTokens();
+          const assembled = assembleContext({
+            contextWindowTokens,
+            systemPrompt: profile?.systemPrompt ?? "",
+            memories: memories.list(owner.id, "active"),
+            sources: foundSources,
+            history,
+          });
+          const selectedSources = foundSources.filter((source) =>
+            assembled.sources.some((selected) => selected.chunkId === source.chunkId),
+          );
+          knowledge.recordMessageSources(assistant.id, selectedSources);
+          if (selectedSources.length) {
+            emit(
+              "context.sources",
+              selectedSources.map(({ chunkId, documentId, sourceName, ordinal }) => ({
+                chunkId,
+                documentId,
+                sourceName,
+                ordinal,
+              })),
+            );
+          }
 
           for await (const event of dependencies.agent.streamReply(
-            { requestId, messages: providerMessages },
+            {
+              requestId,
+              messages: assembled.messages,
+              maxTokens: Math.min(2_048, Math.floor(contextWindowTokens / 4)),
+            },
             { signal: providerSignal },
           )) {
             if (event.type === "message.delta") {
@@ -283,7 +332,7 @@ export function createApp(dependencies: AppDependencies) {
   app.use(
     "/v1/*",
     bodyLimit({
-      maxSize: 64 * 1024,
+      maxSize: 1_100_000,
       onError: (context) =>
         context.json(
           toErrorEnvelope(
@@ -463,6 +512,195 @@ export function createApp(dependencies: AppDependencies) {
     return context.json({ profile: profiles.findByOwnerId(owner.id) });
   });
 
+  app.get("/v1/memories", (context) => {
+    const owner = currentOwner(context);
+    const status = z.enum(memoryStatuses).optional().parse(context.req.query("status"));
+    return context.json({ memories: memories.list(owner.id, status) });
+  });
+
+  app.post("/v1/memories", async (context) => {
+    const owner = currentOwner(context);
+    const input = z
+      .object({
+        type: z.enum(memoryTypes),
+        content: z.string().trim().min(1).max(2_000),
+        sourceMessageId: z.string().nullable().default(null),
+      })
+      .parse(await context.req.json());
+    if (input.sourceMessageId && !messageRepository.findForOwner(input.sourceMessageId, owner.id)) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Source message not found",
+        status: 404,
+      });
+    }
+    const now = new Date().toISOString();
+    const memory = {
+      id: createId("memory"),
+      ownerId: owner.id,
+      type: input.type as MemoryType,
+      content: input.content,
+      sourceMessageId: input.sourceMessageId,
+      confidence: 1,
+      status: "active" as const,
+      createdAt: now,
+      updatedAt: now,
+    };
+    memories.create(memory);
+    return context.json({ memory }, 201);
+  });
+
+  app.patch("/v1/memories/:id", async (context) => {
+    const owner = currentOwner(context);
+    const current = memories.findForOwner(context.req.param("id"), owner.id);
+    if (!current) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Memory not found", status: 404 });
+    }
+    const input = z
+      .object({
+        type: z.enum(memoryTypes).default(current.type),
+        content: z.string().trim().min(1).max(2_000).default(current.content),
+        status: z.enum(memoryStatuses).default(current.status),
+      })
+      .parse(await context.req.json());
+    memories.update(current.id, owner.id, {
+      type: input.type as MemoryType,
+      content: input.content,
+      status: input.status as MemoryStatus,
+      updatedAt: new Date().toISOString(),
+    });
+    return context.json({ memory: memories.findForOwner(current.id, owner.id) });
+  });
+
+  app.delete("/v1/memories/:id", (context) => {
+    const owner = currentOwner(context);
+    if (!memories.delete(context.req.param("id"), owner.id)) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Memory not found", status: 404 });
+    }
+    checkpointDeletedContent();
+    return context.body(null, 204);
+  });
+
+  app.get("/v1/knowledge", (context) => {
+    const owner = currentOwner(context);
+    const documents = knowledge.listDocuments(owner.id).map(({ content, ...document }) => ({
+      ...document,
+      bytes: new TextEncoder().encode(content).byteLength,
+    }));
+    return context.json({ documents });
+  });
+
+  app.post("/v1/knowledge", async (context) => {
+    const owner = currentOwner(context);
+    const input = z
+      .object({ sourceName: z.string().trim().min(1).max(180), content: z.string().min(1) })
+      .parse(await context.req.json());
+    if (
+      input.sourceName.includes("/") ||
+      input.sourceName.includes("\\") ||
+      !/\.(?:md|txt)$/iu.test(input.sourceName)
+    ) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Only .md and .txt files are supported",
+        status: 400,
+      });
+    }
+    if (
+      input.content.includes("\0") ||
+      new TextEncoder().encode(input.content).byteLength > KNOWLEDGE_MAX_BYTES
+    ) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Knowledge file must be valid text up to 1 MiB",
+        status: 413,
+      });
+    }
+    const chunks = chunkKnowledgeText(input.content);
+    if (!chunks.length) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Knowledge file is empty",
+        status: 400,
+      });
+    }
+    const now = new Date().toISOString();
+    const checksum = new Bun.CryptoHasher("sha256").update(input.content).digest("hex");
+    const document = {
+      id: createId("document"),
+      ownerId: owner.id,
+      sourceName: input.sourceName,
+      mediaType: input.sourceName.toLowerCase().endsWith(".md")
+        ? ("text/markdown" as const)
+        : ("text/plain" as const),
+      checksum,
+      content: input.content,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const created = knowledge.createDocument(
+      document,
+      chunks.map((content, ordinal) => ({
+        publicId: createId("chunk"),
+        ordinal,
+        checksum: new Bun.CryptoHasher("sha256").update(content).digest("hex"),
+        content,
+      })),
+    );
+    if (!created) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "This knowledge file already exists",
+        status: 409,
+      });
+    }
+    return context.json(
+      {
+        document: {
+          ...document,
+          content: undefined,
+          bytes: new TextEncoder().encode(input.content).byteLength,
+        },
+      },
+      201,
+    );
+  });
+
+  app.delete("/v1/knowledge/:id", (context) => {
+    const owner = currentOwner(context);
+    if (!knowledge.deleteDocument(context.req.param("id"), owner.id)) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Knowledge document not found",
+        status: 404,
+      });
+    }
+    checkpointDeletedContent();
+    return context.body(null, 204);
+  });
+
+  app.get("/v1/export", (context) => {
+    const owner = currentOwner(context);
+    const exportedSessions = sessions.listForOwner(owner.id).map((session) => ({
+      ...session,
+      messages: messageRepository.list(session.id).map((message) => ({
+        ...message,
+        sources: publicSources(message.id),
+      })),
+    }));
+    context.header("cache-control", "no-store");
+    context.header("content-disposition", 'attachment; filename="bantuin-export.json"');
+    return context.json({
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      owner,
+      profile: profiles.findByOwnerId(owner.id),
+      memories: memories.list(owner.id),
+      knowledge: knowledge.listDocuments(owner.id),
+      sessions: exportedSessions,
+    });
+  });
+
   app.get("/v1/sessions", (context) => {
     const owner = currentOwner(context);
     return context.json({ sessions: sessions.listForOwner(owner.id) });
@@ -497,7 +735,12 @@ export function createApp(dependencies: AppDependencies) {
     if (!session) {
       throw new AppError({ code: "VALIDATION_FAILED", message: "Session not found", status: 404 });
     }
-    return context.json({ messages: messageRepository.list(session.id) });
+    return context.json({
+      messages: messageRepository.list(session.id).map((message) => ({
+        ...message,
+        sources: publicSources(message.id),
+      })),
+    });
   });
 
   app.post("/v1/sessions/:id/messages", async (context) => {
@@ -645,6 +888,22 @@ export function createApp(dependencies: AppDependencies) {
         get: operation("Read the assistant profile"),
         patch: operation("Update the assistant profile"),
       },
+      "/v1/memories": {
+        get: operation("List owner-controlled memories"),
+        post: operation("Create an explicit memory", "201"),
+      },
+      "/v1/memories/{id}": {
+        patch: operation("Update or archive a memory"),
+        delete: operation("Permanently delete a memory", "204"),
+      },
+      "/v1/knowledge": {
+        get: operation("List local knowledge documents"),
+        post: operation("Index a text knowledge document", "201"),
+      },
+      "/v1/knowledge/{id}": {
+        delete: operation("Permanently delete a knowledge document", "204"),
+      },
+      "/v1/export": { get: operation("Export owner data as JSON") },
       "/v1/sessions": {
         get: operation("List chat sessions"),
         post: operation("Create a chat session", "201"),

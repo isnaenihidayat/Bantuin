@@ -4,7 +4,7 @@ Last updated: 22-06-26
 
 ## Product
 
-Bantuin is a self-hostable, Bahasa-Indonesia-first personal AI assistant. Sprint 1 is verified; the current execution anchor is Sprint 2 Core Chat under `process/features/personal-ai-assistant/active/`.
+Bantuin is a self-hostable, Bahasa-Indonesia-first personal AI assistant. Sprints 1–2 are verified; Sprint 3 Memory and Knowledge is awaiting manual/user verification. The approved TinyClaw independent-product-clone program supersedes the selective-parity plan and is currently paused after Phase 01 web research.
 
 ## Architecture boundaries
 
@@ -38,6 +38,6 @@ Bantuin is a self-hostable, Bahasa-Indonesia-first personal AI assistant. Sprint
 ## Start here when resuming
 
 1. Read the umbrella plan.
-2. Read the current direct sprint plan.
-3. Read the current sprint report.
+2. Read the active TinyClaw clone phase plan and report.
+3. Read the current sprint plan and report.
 4. Run `git status --short --branch` and `bun run check`.

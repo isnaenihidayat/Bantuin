@@ -549,3 +549,378 @@ export class MessageRepository {
     );
   }
 }
+
+export type MemoryType = "preference" | "fact" | "goal" | "note";
+export type MemoryStatus = "active" | "archived";
+
+export type MemoryRecord = {
+  id: string;
+  ownerId: string;
+  type: MemoryType;
+  content: string;
+  sourceMessageId: string | null;
+  confidence: number;
+  status: MemoryStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type MemoryRow = {
+  id: string;
+  owner_id: string;
+  type: MemoryType;
+  content: string;
+  source_message_id: string | null;
+  confidence: number;
+  status: MemoryStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+function toMemory(row: MemoryRow): MemoryRecord {
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    type: row.type,
+    content: row.content,
+    sourceMessageId: row.source_message_id,
+    confidence: row.confidence,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const memorySelect = `SELECT id, owner_id, type, content, source_message_id, confidence,
+                             status, created_at, updated_at
+                      FROM memories`;
+
+export class MemoryRepository {
+  readonly #database: BantuinDatabase;
+
+  constructor(database: BantuinDatabase) {
+    this.#database = database;
+  }
+
+  create(memory: MemoryRecord): void {
+    this.#database
+      .query(
+        `INSERT INTO memories(
+           id, owner_id, type, content, source_message_id, confidence, status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        memory.id,
+        memory.ownerId,
+        memory.type,
+        memory.content,
+        memory.sourceMessageId,
+        memory.confidence,
+        memory.status,
+        memory.createdAt,
+        memory.updatedAt,
+      );
+  }
+
+  list(ownerId: string, status?: MemoryStatus): MemoryRecord[] {
+    const rows = status
+      ? this.#database
+          .query<MemoryRow, [ownerId: string, status: MemoryStatus]>(
+            `${memorySelect} WHERE owner_id = ? AND status = ? ORDER BY updated_at DESC LIMIT 200`,
+          )
+          .all(ownerId, status)
+      : this.#database
+          .query<MemoryRow, [ownerId: string]>(
+            `${memorySelect} WHERE owner_id = ? ORDER BY updated_at DESC LIMIT 200`,
+          )
+          .all(ownerId);
+    return rows.map(toMemory);
+  }
+
+  findForOwner(id: string, ownerId: string): MemoryRecord | null {
+    const row = this.#database
+      .query<MemoryRow, [id: string, ownerId: string]>(
+        `${memorySelect} WHERE id = ? AND owner_id = ?`,
+      )
+      .get(id, ownerId);
+    return row ? toMemory(row) : null;
+  }
+
+  update(
+    id: string,
+    ownerId: string,
+    input: { type: MemoryType; content: string; status: MemoryStatus; updatedAt: string },
+  ): boolean {
+    return (
+      Number(
+        this.#database
+          .query(
+            `UPDATE memories SET type = ?, content = ?, status = ?, updated_at = ?
+             WHERE id = ? AND owner_id = ?`,
+          )
+          .run(input.type, input.content, input.status, input.updatedAt, id, ownerId).changes,
+      ) === 1
+    );
+  }
+
+  delete(id: string, ownerId: string): boolean {
+    return (
+      Number(
+        this.#database.query("DELETE FROM memories WHERE id = ? AND owner_id = ?").run(id, ownerId)
+          .changes,
+      ) === 1
+    );
+  }
+}
+
+export type KnowledgeDocumentRecord = {
+  id: string;
+  ownerId: string;
+  sourceName: string;
+  mediaType: "text/plain" | "text/markdown";
+  checksum: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type KnowledgeChunkInput = {
+  publicId: string;
+  ordinal: number;
+  checksum: string;
+  content: string;
+};
+
+export type KnowledgeSource = {
+  id: number;
+  chunkId: string;
+  documentId: string;
+  sourceName: string;
+  ordinal: number;
+  content: string;
+  score: number;
+};
+
+export function buildFtsQuery(text: string): string | null {
+  const terms = text
+    .normalize("NFKC")
+    .toLocaleLowerCase("id")
+    .match(/[\p{L}\p{N}]{2,}/gu)
+    ?.slice(0, 8);
+  if (!terms?.length) return null;
+  return [...new Set(terms)].map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ");
+}
+
+export function chunkKnowledgeText(content: string, target = 1_200, overlap = 160): string[] {
+  const text = content.replaceAll("\r\n", "\n").trim();
+  if (!text) return [];
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + target, text.length);
+    if (end < text.length) {
+      const boundary = text.lastIndexOf("\n", end);
+      if (boundary > start + target * 0.6) end = boundary;
+    }
+    const chunk = text.slice(start, end).trim();
+    if (chunk) chunks.push(chunk);
+    if (end === text.length) break;
+    start = Math.max(start + 1, end - overlap);
+  }
+  return chunks;
+}
+
+export class KnowledgeRepository {
+  readonly #database: BantuinDatabase;
+
+  constructor(database: BantuinDatabase) {
+    this.#database = database;
+  }
+
+  createDocument(document: KnowledgeDocumentRecord, chunks: KnowledgeChunkInput[]): boolean {
+    return this.#database
+      .transaction(() => {
+        const duplicate = this.#database
+          .query<{ id: string }, [ownerId: string, checksum: string]>(
+            "SELECT id FROM knowledge_documents WHERE owner_id = ? AND checksum = ?",
+          )
+          .get(document.ownerId, document.checksum);
+        if (duplicate) return false;
+
+        this.#database
+          .query(
+            `INSERT INTO knowledge_documents(
+               id, owner_id, source_name, media_type, checksum, content, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            document.id,
+            document.ownerId,
+            document.sourceName,
+            document.mediaType,
+            document.checksum,
+            document.content,
+            document.createdAt,
+            document.updatedAt,
+          );
+        const insertChunk = this.#database.query(
+          `INSERT INTO knowledge_chunks(public_id, document_id, ordinal, checksum, content)
+           VALUES (?, ?, ?, ?, ?)`,
+        );
+        for (const chunk of chunks) {
+          insertChunk.run(
+            chunk.publicId,
+            document.id,
+            chunk.ordinal,
+            chunk.checksum,
+            chunk.content,
+          );
+        }
+        return true;
+      })
+      .immediate();
+  }
+
+  listDocuments(ownerId: string): KnowledgeDocumentRecord[] {
+    return this.#database
+      .query<
+        {
+          id: string;
+          owner_id: string;
+          source_name: string;
+          media_type: "text/plain" | "text/markdown";
+          checksum: string;
+          content: string;
+          created_at: string;
+          updated_at: string;
+        },
+        [ownerId: string]
+      >(
+        `SELECT id, owner_id, source_name, media_type, checksum, content, created_at, updated_at
+         FROM knowledge_documents WHERE owner_id = ? ORDER BY created_at DESC LIMIT 200`,
+      )
+      .all(ownerId)
+      .map((row) => ({
+        id: row.id,
+        ownerId: row.owner_id,
+        sourceName: row.source_name,
+        mediaType: row.media_type,
+        checksum: row.checksum,
+        content: row.content,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+  }
+
+  search(ownerId: string, text: string, limit = 5): KnowledgeSource[] {
+    const query = buildFtsQuery(text);
+    if (!query) return [];
+    return this.#database
+      .query<
+        {
+          id: number;
+          public_id: string;
+          document_id: string;
+          source_name: string;
+          ordinal: number;
+          content: string;
+          score: number;
+        },
+        [query: string, ownerId: string, limit: number]
+      >(
+        `SELECT knowledge_chunks.id, knowledge_chunks.public_id,
+                knowledge_chunks.document_id, knowledge_documents.source_name,
+                knowledge_chunks.ordinal, knowledge_chunks.content,
+                bm25(knowledge_chunks_fts) AS score
+         FROM knowledge_chunks_fts
+         JOIN knowledge_chunks ON knowledge_chunks.id = knowledge_chunks_fts.rowid
+         JOIN knowledge_documents ON knowledge_documents.id = knowledge_chunks.document_id
+         WHERE knowledge_chunks_fts MATCH ? AND knowledge_documents.owner_id = ?
+         ORDER BY score LIMIT ?`,
+      )
+      .all(query, ownerId, limit)
+      .map((row) => ({
+        id: row.id,
+        chunkId: row.public_id,
+        documentId: row.document_id,
+        sourceName: row.source_name,
+        ordinal: row.ordinal,
+        content: row.content,
+        score: row.score,
+      }));
+  }
+
+  recordMessageSources(messageId: string, sources: KnowledgeSource[]): void {
+    this.#database.transaction(() => {
+      this.#database
+        .query("DELETE FROM message_knowledge_sources WHERE message_id = ?")
+        .run(messageId);
+      const insert = this.#database.query(
+        `INSERT INTO message_knowledge_sources(message_id, chunk_id, rank)
+         VALUES (?, ?, ?)`,
+      );
+      sources.forEach((source, rank) => {
+        insert.run(messageId, source.id, rank);
+      });
+    })();
+  }
+
+  listMessageSources(messageId: string): KnowledgeSource[] {
+    return this.#database
+      .query<
+        {
+          id: number;
+          public_id: string;
+          document_id: string;
+          source_name: string;
+          ordinal: number;
+          content: string;
+          rank: number;
+        },
+        [messageId: string]
+      >(
+        `SELECT knowledge_chunks.id, knowledge_chunks.public_id,
+                knowledge_chunks.document_id, knowledge_documents.source_name,
+                knowledge_chunks.ordinal, knowledge_chunks.content,
+                message_knowledge_sources.rank
+         FROM message_knowledge_sources
+         JOIN knowledge_chunks ON knowledge_chunks.id = message_knowledge_sources.chunk_id
+         JOIN knowledge_documents ON knowledge_documents.id = knowledge_chunks.document_id
+         WHERE message_knowledge_sources.message_id = ?
+         ORDER BY message_knowledge_sources.rank`,
+      )
+      .all(messageId)
+      .map((row) => ({
+        id: row.id,
+        chunkId: row.public_id,
+        documentId: row.document_id,
+        sourceName: row.source_name,
+        ordinal: row.ordinal,
+        content: row.content,
+        score: row.rank,
+      }));
+  }
+
+  deleteDocument(id: string, ownerId: string): boolean {
+    const owned = this.#database
+      .query<{ value: number }, [id: string, ownerId: string]>(
+        "SELECT 1 AS value FROM knowledge_documents WHERE id = ? AND owner_id = ?",
+      )
+      .get(id, ownerId);
+    if (!owned) return false;
+    this.#database
+      .query("DELETE FROM knowledge_documents WHERE id = ? AND owner_id = ?")
+      .run(id, ownerId);
+    return !this.#database
+      .query<{ value: number }, [id: string]>(
+        "SELECT 1 AS value FROM knowledge_documents WHERE id = ?",
+      )
+      .get(id);
+  }
+
+  checkFtsIntegrity(): void {
+    this.#database.exec(
+      "INSERT INTO knowledge_chunks_fts(knowledge_chunks_fts, rank) VALUES ('integrity-check', 1)",
+    );
+  }
+}
