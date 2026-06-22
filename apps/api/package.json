@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "dev": "cd ../.. && BANTUIN_PUBLIC_ORIGIN=http://127.0.0.1:5173 bun --watch apps/api/src/index.ts"
+  },
   "dependencies": {
     "@bantuin/agent": "workspace:*",
     "@bantuin/client": "workspace:*",

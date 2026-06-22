@@ -1,4 +1,4 @@
-export const BANTUIN_API_VERSION = "1.0.0-foundation";
+export const BANTUIN_API_VERSION = "2.0.0-core-chat";
 
 export type HealthResponse = {
   status: "ok";

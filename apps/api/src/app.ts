@@ -7,12 +7,39 @@ import {
   createId,
   toErrorEnvelope,
 } from "@bantuin/core";
-import { checkDatabase, type BantuinDatabase } from "@bantuin/db";
+import {
+  AuthRepository,
+  checkDatabase,
+  type BantuinDatabase,
+  MessageRepository,
+  type MessageRecord,
+  ProfileRepository,
+  SessionRepository,
+} from "@bantuin/db";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import type { Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { serveStatic } from "hono/bun";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { secureHeaders } from "hono/secure-headers";
 
 type Variables = {
   requestId: string;
 };
+
+type AppContext = Context<{ Variables: Variables }>;
+
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
+const LOGIN_WINDOW_MS = 5 * 60 * 1_000;
+const LOGIN_MAX_FAILURES = 5;
+
+function createSessionToken(): string {
+  return Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+}
+
+function hashSessionToken(token: string): string {
+  return new Bun.CryptoHasher("sha256").update(token).digest("hex");
+}
 
 export type AppDependencies = {
   config: AppConfig;
@@ -63,11 +90,227 @@ const readinessRoute = createRoute({
 
 export function createApp(dependencies: AppDependencies) {
   const app = new OpenAPIHono<{ Variables: Variables }>();
+  const auth = new AuthRepository(dependencies.database);
+  const profiles = new ProfileRepository(dependencies.database);
+  const sessions = new SessionRepository(dependencies.database);
+  const messageRepository = new MessageRepository(dependencies.database);
+  const activeStreams = new Map<string, AbortController>();
+  // ponytail: single-process limiter; move to shared storage before horizontal deployment.
+  const loginFailures = new Map<string, { count: number; resetAt: number }>();
+  const secureCookies = new URL(dependencies.config.publicOrigin).protocol === "https:";
+  const sessionCookie = secureCookies ? "__Host-bantuin_session" : "bantuin_session";
+  messageRepository.reconcileInterrupted(new Date().toISOString());
+
+  function startSession(context: AppContext, ownerId: string): void {
+    const token = createSessionToken();
+    const createdAt = new Date();
+    auth.createSession({
+      tokenHash: hashSessionToken(token),
+      ownerId,
+      createdAt: createdAt.toISOString(),
+      expiresAt: new Date(createdAt.getTime() + SESSION_MAX_AGE_SECONDS * 1_000).toISOString(),
+    });
+    setCookie(context, sessionCookie, token, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "Strict",
+      secure: secureCookies,
+      maxAge: SESSION_MAX_AGE_SECONDS,
+    });
+    context.header("cache-control", "no-store");
+  }
+
+  function currentOwner(context: AppContext) {
+    const token = getCookie(context, sessionCookie);
+    const owner = token
+      ? auth.findOwnerBySession(hashSessionToken(token), new Date().toISOString())
+      : null;
+    if (!owner) {
+      throw new AppError({
+        code: "AUTHENTICATION_REQUIRED",
+        message: "Authentication required",
+        status: 401,
+      });
+    }
+    return owner;
+  }
+
+  function streamAssistant(
+    context: AppContext,
+    assistant: MessageRecord,
+    created: boolean,
+  ): Response {
+    const requestId = context.get("requestId");
+    const encoder = new TextEncoder();
+    const abortController = new AbortController();
+    const providerSignal = AbortSignal.any([abortController.signal, AbortSignal.timeout(120_000)]);
+    activeStreams.set(assistant.id, abortController);
+    context.req.raw.signal.addEventListener("abort", () => abortController.abort(), { once: true });
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let terminal = false;
+        const emit = (event: string | undefined, data: unknown) =>
+          controller.enqueue(
+            encoder.encode(
+              encodeSseFrame({
+                ...(event ? { event } : {}),
+                data: typeof data === "string" ? data : JSON.stringify(data),
+              }),
+            ),
+          );
+
+        try {
+          emit("message.accepted", assistant);
+          if (!created) {
+            emit(undefined, "[DONE]");
+            terminal = true;
+            return;
+          }
+
+          const profile = profiles.findByOwnerId(currentOwner(context).id);
+          const history = messageRepository
+            .list(assistant.sessionId)
+            .filter((message) => message.id !== assistant.id && message.status === "completed")
+            .map((message) => ({ role: message.role, content: message.content }));
+          const providerMessages = [
+            ...(profile?.systemPrompt
+              ? [{ role: "system" as const, content: profile.systemPrompt }]
+              : []),
+            ...history,
+          ];
+
+          for await (const event of dependencies.agent.streamReply(
+            { requestId, messages: providerMessages },
+            { signal: providerSignal },
+          )) {
+            if (event.type === "message.delta") {
+              messageRepository.appendDelta(assistant.id, event.delta, new Date().toISOString());
+            } else if (event.type === "message.error") {
+              messageRepository.finish(assistant.id, "failed", new Date().toISOString(), {
+                errorCode: event.code,
+              });
+              terminal = true;
+            } else if (event.type === "message.completed") {
+              messageRepository.finish(assistant.id, "completed", new Date().toISOString(), {
+                ...(event.providerRequestId ? { providerRequestId: event.providerRequestId } : {}),
+              });
+              terminal = true;
+            }
+            emit(event.type, event);
+            if (event.type === "message.error") break;
+          }
+
+          if (!terminal) {
+            messageRepository.finish(assistant.id, "failed", new Date().toISOString(), {
+              errorCode: "PROVIDER_STREAM_FAILED",
+            });
+            emit("message.error", {
+              type: "message.error",
+              code: "PROVIDER_STREAM_FAILED",
+              message: "Provider stream ended unexpectedly",
+              retryable: true,
+              partial: true,
+            });
+          }
+          emit(undefined, "[DONE]");
+        } catch (error) {
+          const cancelled = abortController.signal.aborted;
+          messageRepository.finish(
+            assistant.id,
+            cancelled ? "cancelled" : "failed",
+            new Date().toISOString(),
+            { errorCode: cancelled ? "CANCELLED" : "PROVIDER_STREAM_FAILED" },
+          );
+          try {
+            emit(
+              cancelled ? "message.cancelled" : "message.error",
+              cancelled
+                ? { type: "message.cancelled", messageId: assistant.id }
+                : toErrorEnvelope(error, requestId).error,
+            );
+            emit(undefined, "[DONE]");
+          } catch {
+            // Client disconnected; durable state was already written above.
+          }
+        } finally {
+          activeStreams.delete(assistant.id);
+          try {
+            controller.close();
+          } catch {
+            // Stream may already be cancelled by the client.
+          }
+        }
+      },
+      cancel() {
+        abortController.abort();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "content-type": "text/event-stream; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
 
   app.use("*", async (context, next) => {
     const requestId = context.req.header("x-request-id") || createId("request");
     context.set("requestId", requestId);
     context.header("x-request-id", requestId);
+    await next();
+  });
+
+  app.use(
+    "*",
+    secureHeaders({
+      contentSecurityPolicy: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        connectSrc: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        imgSrc: ["'self'", "data:"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'"],
+      },
+    }),
+  );
+  app.use(
+    "/v1/*",
+    bodyLimit({
+      maxSize: 64 * 1024,
+      onError: (context) =>
+        context.json(
+          toErrorEnvelope(
+            new AppError({
+              code: "VALIDATION_FAILED",
+              message: "Request body is too large",
+              status: 413,
+            }),
+            context.get("requestId"),
+          ),
+          413,
+        ),
+    }),
+  );
+
+  app.use("/v1/*", async (context, next) => {
+    if (!["GET", "HEAD", "OPTIONS"].includes(context.req.method)) {
+      const origin = context.req.header("origin");
+      const csrfHeader = context.req.header("x-csrf-token");
+      if (origin !== dependencies.config.publicOrigin || csrfHeader !== "1") {
+        throw new AppError({
+          code: "CSRF_REJECTED",
+          message: "Cross-site request rejected",
+          status: 403,
+        });
+      }
+    }
     await next();
   });
 
@@ -93,6 +336,229 @@ export function createApp(dependencies: AppDependencies) {
     } as const;
 
     return status === "ready" ? context.json(response, 200) : context.json(response, 503);
+  });
+
+  app.get("/v1/setup/status", (context) => context.json({ setupComplete: auth.isSetupComplete() }));
+
+  app.post("/v1/setup", async (context) => {
+    if (auth.isSetupComplete()) {
+      throw new AppError({
+        code: "SETUP_ALREADY_COMPLETED",
+        message: "Setup has already been completed",
+        status: 409,
+      });
+    }
+
+    const input = z
+      .object({
+        email: z.email().transform((value) => value.toLowerCase()),
+        password: z.string().min(12).max(128),
+        assistantName: z.string().trim().min(1).max(80).default("Bantuin"),
+      })
+      .parse(await context.req.json());
+    const now = new Date().toISOString();
+    const owner = { id: createId("owner"), email: input.email, createdAt: now };
+    const profile = {
+      id: createId("profile"),
+      ownerId: owner.id,
+      name: input.assistantName,
+      systemPrompt: "Kamu adalah asisten pribadi yang membantu dalam Bahasa Indonesia.",
+      providerModel: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const created = auth.createSetup({
+      owner,
+      profile,
+      passwordHash: await Bun.password.hash(input.password, "argon2id"),
+    });
+    if (!created) {
+      throw new AppError({
+        code: "SETUP_ALREADY_COMPLETED",
+        message: "Setup has already been completed",
+        status: 409,
+      });
+    }
+
+    startSession(context, owner.id);
+    return context.json({ owner, profile }, 201);
+  });
+
+  app.post("/v1/auth/login", async (context) => {
+    const input = z
+      .object({ email: z.email().transform((value) => value.toLowerCase()), password: z.string() })
+      .parse(await context.req.json());
+    const attempt = loginFailures.get(input.email);
+    if (attempt && attempt.count >= LOGIN_MAX_FAILURES && attempt.resetAt > Date.now()) {
+      throw new AppError({
+        code: "AUTHENTICATION_RATE_LIMITED",
+        message: "Too many login attempts; try again later",
+        status: 429,
+      });
+    }
+    const credentials = auth.findCredentialsByEmail(input.email);
+    let passwordMatches = false;
+    if (credentials) {
+      passwordMatches = await Bun.password.verify(input.password, credentials.passwordHash);
+    } else {
+      await Bun.password.hash(input.password);
+    }
+
+    if (!credentials || !passwordMatches) {
+      const activeWindow = Boolean(attempt && attempt.resetAt > Date.now());
+      const count = (activeWindow ? (attempt?.count ?? 0) : 0) + 1;
+      loginFailures.set(input.email, {
+        count,
+        resetAt: activeWindow ? (attempt?.resetAt ?? 0) : Date.now() + LOGIN_WINDOW_MS,
+      });
+      throw new AppError({
+        code: "AUTHENTICATION_FAILED",
+        message: "Email or password is incorrect",
+        status: 401,
+      });
+    }
+
+    loginFailures.delete(input.email);
+    startSession(context, credentials.id);
+    const owner = {
+      id: credentials.id,
+      email: credentials.email,
+      createdAt: credentials.createdAt,
+    };
+    return context.json({ owner, profile: profiles.findByOwnerId(credentials.id) });
+  });
+
+  app.post("/v1/auth/logout", (context) => {
+    const token = getCookie(context, sessionCookie);
+    if (token) auth.deleteSession(hashSessionToken(token));
+    deleteCookie(context, sessionCookie, { path: "/", secure: secureCookies });
+    context.header("cache-control", "no-store");
+    return context.body(null, 204);
+  });
+
+  app.get("/v1/me", (context) => {
+    const owner = currentOwner(context);
+    context.header("cache-control", "no-store");
+    return context.json({ owner, profile: profiles.findByOwnerId(owner.id) });
+  });
+
+  app.get("/v1/profile", (context) => {
+    const owner = currentOwner(context);
+    return context.json({ profile: profiles.findByOwnerId(owner.id) });
+  });
+
+  app.patch("/v1/profile", async (context) => {
+    const owner = currentOwner(context);
+    const current = profiles.findByOwnerId(owner.id);
+    if (!current) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
+    const input = z
+      .object({
+        name: z.string().trim().min(1).max(80).default(current.name),
+        systemPrompt: z.string().trim().max(8_000).default(current.systemPrompt),
+      })
+      .parse(await context.req.json());
+    profiles.update(owner.id, { ...input, updatedAt: new Date().toISOString() });
+    return context.json({ profile: profiles.findByOwnerId(owner.id) });
+  });
+
+  app.get("/v1/sessions", (context) => {
+    const owner = currentOwner(context);
+    return context.json({ sessions: sessions.listForOwner(owner.id) });
+  });
+
+  app.post("/v1/sessions", async (context) => {
+    const owner = currentOwner(context);
+    const profile = profiles.findByOwnerId(owner.id);
+    if (!profile) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
+    const input = z
+      .object({ title: z.string().trim().min(1).max(120).nullable().default(null) })
+      .parse(await context.req.json());
+    const now = new Date().toISOString();
+    const session = {
+      id: createId("session"),
+      ownerId: owner.id,
+      profileId: profile.id,
+      channel: "web",
+      title: input.title,
+      createdAt: now,
+      updatedAt: now,
+    };
+    sessions.create(session);
+    return context.json({ session }, 201);
+  });
+
+  app.get("/v1/sessions/:id/messages", (context) => {
+    const owner = currentOwner(context);
+    const session = sessions.findByIdForOwner(context.req.param("id"), owner.id);
+    if (!session) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Session not found", status: 404 });
+    }
+    return context.json({ messages: messageRepository.list(session.id) });
+  });
+
+  app.post("/v1/sessions/:id/messages", async (context) => {
+    const owner = currentOwner(context);
+    const session = sessions.findByIdForOwner(context.req.param("id"), owner.id);
+    if (!session) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Session not found", status: 404 });
+    }
+    const input = z
+      .object({
+        message: z.string().trim().min(1).max(4_000),
+        clientRequestId: z.string().trim().min(8).max(128),
+      })
+      .parse(await context.req.json());
+    const exchange = messageRepository.createExchange({
+      sessionId: session.id,
+      userMessageId: createId("message"),
+      assistantMessageId: createId("message"),
+      content: input.message,
+      clientRequestId: input.clientRequestId,
+      now: new Date().toISOString(),
+    });
+    return streamAssistant(context, exchange.assistant, exchange.created);
+  });
+
+  app.post("/v1/messages/:id/cancel", (context) => {
+    const owner = currentOwner(context);
+    const message = messageRepository.findForOwner(context.req.param("id"), owner.id);
+    if (message?.role !== "assistant") {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Message not found", status: 404 });
+    }
+    activeStreams.get(message.id)?.abort();
+    messageRepository.finish(message.id, "cancelled", new Date().toISOString(), {
+      errorCode: "CANCELLED",
+    });
+    return context.json({ message: messageRepository.findForOwner(message.id, owner.id) });
+  });
+
+  app.post("/v1/messages/:id/retry", async (context) => {
+    const owner = currentOwner(context);
+    const original = messageRepository.findForOwner(context.req.param("id"), owner.id);
+    if (original?.role !== "assistant") {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Message not found", status: 404 });
+    }
+    if (!["failed", "cancelled"].includes(original.status)) {
+      throw new AppError({
+        code: "VALIDATION_FAILED",
+        message: "Only failed or cancelled messages can be retried",
+        status: 409,
+      });
+    }
+    const input = z
+      .object({ clientRequestId: z.string().trim().min(8).max(128) })
+      .parse(await context.req.json());
+    const retry = messageRepository.createRetry({
+      sessionId: original.sessionId,
+      assistantMessageId: createId("message"),
+      clientRequestId: input.clientRequestId,
+      now: new Date().toISOString(),
+    });
+    return streamAssistant(context, retry.assistant, retry.created);
   });
 
   app.post("/_foundation/mock-chat", async (context) => {
@@ -150,14 +616,52 @@ export function createApp(dependencies: AppDependencies) {
     });
   });
 
-  app.doc("/openapi.json", {
-    openapi: "3.1.0",
-    info: {
-      title: "Bantuin API",
-      version: BANTUIN_API_VERSION,
-      description: "Foundation API for the Bantuin personal assistant",
-    },
+  app.get("/openapi.json", (context) => {
+    const document = app.getOpenAPI31Document({
+      openapi: "3.1.0",
+      info: {
+        title: "Bantuin API",
+        version: BANTUIN_API_VERSION,
+        description: "API for the Bantuin personal assistant",
+      },
+    });
+    const paths = document.paths ?? {};
+    const operation = (summary: string, success = "200") => ({
+      summary,
+      responses: {
+        [success]: { description: "Success" },
+        "400": { description: "Invalid request" },
+        "401": { description: "Authentication required" },
+        "403": { description: "Cross-site request rejected" },
+      },
+    });
+    Object.assign(paths, {
+      "/v1/setup/status": { get: operation("Read first-run setup status") },
+      "/v1/setup": { post: operation("Create the single owner and default profile", "201") },
+      "/v1/auth/login": { post: operation("Create a browser session") },
+      "/v1/auth/logout": { post: operation("End the current browser session", "204") },
+      "/v1/me": { get: operation("Read the authenticated owner and profile") },
+      "/v1/profile": {
+        get: operation("Read the assistant profile"),
+        patch: operation("Update the assistant profile"),
+      },
+      "/v1/sessions": {
+        get: operation("List chat sessions"),
+        post: operation("Create a chat session", "201"),
+      },
+      "/v1/sessions/{id}/messages": {
+        get: operation("Read ordered durable message history"),
+        post: operation("Submit a message and stream the assistant response"),
+      },
+      "/v1/messages/{id}/cancel": { post: operation("Cancel an active assistant response") },
+      "/v1/messages/{id}/retry": { post: operation("Retry a failed assistant response") },
+    });
+    document.paths = paths;
+    return context.json(document);
   });
+
+  app.use("/assets/*", serveStatic({ root: "./dist/web" }));
+  app.get("/", serveStatic({ path: "./dist/web/index.html" }));
 
   app.notFound((context) =>
     context.json(
@@ -181,7 +685,10 @@ export function createApp(dependencies: AppDependencies) {
           })
         : error;
     const status = appError instanceof AppError ? appError.status : 500;
-    return context.json(toErrorEnvelope(appError, requestId), status as 400 | 404 | 500 | 503);
+    return context.json(
+      toErrorEnvelope(appError, requestId),
+      status as 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 503,
+    );
   });
 
   return app;

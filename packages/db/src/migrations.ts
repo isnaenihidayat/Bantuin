@@ -1,5 +1,6 @@
 import type { BantuinDatabase } from "./database";
 import initialMigration from "../migrations/0001_initial.sql";
+import coreChatMigration from "../migrations/0002_core_chat.sql";
 
 type Migration = {
   version: number;
@@ -12,6 +13,11 @@ const migrations: Migration[] = [
     version: 1,
     name: "initial",
     sql: initialMigration,
+  },
+  {
+    version: 2,
+    name: "core_chat",
+    sql: coreChatMigration,
   },
 ];
 

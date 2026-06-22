@@ -9,10 +9,13 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun run dev:api",
+    "dev": "bun run --filter '*' dev",
     "dev:api": "bun --watch apps/api/src/index.ts",
+    "dev:web": "bun --cwd apps/web dev",
     "start": "bun apps/api/src/index.ts",
-    "build": "bun build apps/api/src/index.ts --outdir dist/api --target bun --minify",
+    "build": "bun run build:api && bun run build:web",
+    "build:api": "bun build apps/api/src/index.ts --outdir dist/api --target bun --minify",
+    "build:web": "bun --cwd apps/web build",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",

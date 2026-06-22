@@ -20,6 +20,7 @@ ENV NODE_ENV=production \
 
 RUN addgroup -S bantuin && adduser -S bantuin -G bantuin && mkdir -p /data && chown bantuin:bantuin /data
 COPY --from=build --chown=bantuin:bantuin /app/dist/api/index.js ./index.js
+COPY --from=build --chown=bantuin:bantuin /app/dist/web ./dist/web
 
 USER bantuin
 EXPOSE 4310

@@ -9,6 +9,7 @@ const environmentSchema = z
   .object({
     BANTUIN_HOST: z.string().trim().min(1).default("127.0.0.1"),
     BANTUIN_PORT: z.coerce.number().int().min(1).max(65_535).default(4310),
+    BANTUIN_PUBLIC_ORIGIN: z.url().default("http://127.0.0.1:4310"),
     DATABASE_URL: z.string().trim().startsWith("file:").default("file:data/bantuin.sqlite"),
     BANTUIN_PROVIDER: z.enum(["mock", "openrouter"]).default("mock"),
     OPENROUTER_API_KEY: z.string().trim().optional(),
@@ -42,6 +43,7 @@ const environmentSchema = z
 export type AppConfig = {
   host: string;
   port: number;
+  publicOrigin: string;
   databaseUrl: string;
   provider:
     | { kind: "mock" }
@@ -76,6 +78,7 @@ export function loadConfig(
   return {
     host: parsed.BANTUIN_HOST,
     port: parsed.BANTUIN_PORT,
+    publicOrigin: parsed.BANTUIN_PUBLIC_ORIGIN.replace(/\/$/, ""),
     databaseUrl: parsed.DATABASE_URL,
     provider,
     liveProviderCheck: parsed.BANTUIN_LIVE_PROVIDER_CHECK,
