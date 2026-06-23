@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { constants } from "node:fs";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { databasePathFromUrl } from "@bantuin/db";
+import { databasePathFromUrl, migrateDatabase, openDatabase } from "@bantuin/db";
 
 const CURRENT_SCHEMA_VERSION = 6;
 
@@ -18,14 +18,22 @@ export async function backupDatabase(databaseUrl: string, directory: string) {
   const stamp = new Date().toISOString().replaceAll(/[:.]/gu, "-");
   const snapshot = join(targetDirectory, `bantuin-${stamp}.sqlite`);
   const database = new Database(source, { readonly: true, strict: true });
+  let schemaVersion: number | null;
   try {
     database.query("VACUUM INTO ?").run(snapshot);
+    schemaVersion =
+      database
+        .query<{ version: number | null }, []>(
+          "SELECT MAX(version) AS version FROM schema_migrations",
+        )
+        .get()?.version ?? null;
   } finally {
     database.close();
   }
+  if (!schemaVersion) throw new Error("Source database has no applied migrations");
   const manifest = {
     version: 1,
-    schemaVersion: CURRENT_SCHEMA_VERSION,
+    schemaVersion,
     createdAt: new Date().toISOString(),
     snapshot: basename(snapshot),
     bytes: (await stat(snapshot)).size,
@@ -42,7 +50,9 @@ export async function restoreDatabase(manifestPath: string, targetDatabaseUrl: s
   const raw = JSON.parse(await readFile(resolve(manifestPath), "utf8")) as Record<string, unknown>;
   if (
     raw.version !== 1 ||
-    raw.schemaVersion !== CURRENT_SCHEMA_VERSION ||
+    typeof raw.schemaVersion !== "number" ||
+    raw.schemaVersion < 1 ||
+    raw.schemaVersion > CURRENT_SCHEMA_VERSION ||
     typeof raw.snapshot !== "string" ||
     basename(raw.snapshot) !== raw.snapshot ||
     typeof raw.sha256 !== "string"
@@ -61,7 +71,7 @@ export async function restoreDatabase(manifestPath: string, targetDatabaseUrl: s
         "SELECT MAX(version) AS version FROM schema_migrations",
       )
       .get();
-    if (integrity?.integrity_check !== "ok" || schema?.version !== CURRENT_SCHEMA_VERSION) {
+    if (integrity?.integrity_check !== "ok" || schema?.version !== raw.schemaVersion) {
       throw new Error("Backup database failed integrity or schema validation");
     }
   } finally {
@@ -69,6 +79,14 @@ export async function restoreDatabase(manifestPath: string, targetDatabaseUrl: s
   }
   await mkdir(resolve(target, ".."), { recursive: true });
   await copyFile(snapshot, target, constants.COPYFILE_EXCL);
+  if (raw.schemaVersion < CURRENT_SCHEMA_VERSION) {
+    const restored = openDatabase(targetDatabaseUrl);
+    try {
+      migrateDatabase(restored);
+    } finally {
+      restored.close();
+    }
+  }
   return target;
 }
 

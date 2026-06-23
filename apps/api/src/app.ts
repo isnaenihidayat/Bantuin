@@ -5,6 +5,7 @@ import {
   type AppConfig,
   AppError,
   createId,
+  logEvent,
   toErrorEnvelope,
 } from "@bantuin/core";
 import {
@@ -404,7 +405,15 @@ export function createApp(dependencies: AppDependencies) {
     const requestId = context.req.header("x-request-id") || createId("request");
     context.set("requestId", requestId);
     context.header("x-request-id", requestId);
+    const startedAt = performance.now();
     await next();
+    logEvent("info", "request.completed", {
+      requestId,
+      method: context.req.method,
+      path: new URL(context.req.url).pathname,
+      status: context.res.status,
+      durationMs: Math.round(performance.now() - startedAt),
+    });
   });
 
   app.use(
@@ -1653,6 +1662,11 @@ export function createApp(dependencies: AppDependencies) {
           })
         : error;
     const status = appError instanceof AppError ? appError.status : 500;
+    logEvent("error", "request.failed", {
+      requestId,
+      status,
+      code: appError instanceof AppError ? appError.code : "INTERNAL_ERROR",
+    });
     return context.json(
       toErrorEnvelope(appError, requestId),
       status as 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 503,

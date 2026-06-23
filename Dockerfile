@@ -18,6 +18,7 @@ ENV NODE_ENV=production \
     DATABASE_URL=file:/data/bantuin.sqlite \
     BANTUIN_PROVIDER=mock
 
+RUN apk upgrade --no-cache libcrypto3 libssl3
 RUN addgroup -S bantuin && adduser -S bantuin -G bantuin && mkdir -p /data && chown bantuin:bantuin /data
 COPY --from=build --chown=bantuin:bantuin /app/dist/api/index.js ./index.js
 COPY --from=build --chown=bantuin:bantuin /app/dist/web ./dist/web
