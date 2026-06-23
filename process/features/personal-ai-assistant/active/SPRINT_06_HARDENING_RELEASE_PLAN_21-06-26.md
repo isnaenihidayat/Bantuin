@@ -2,7 +2,7 @@
 
 Date: 21-06-26  
 Complexity: Complex phase 6/6  
-Status: ✅ PATCH VERIFIED — release-readiness patch approved for commit/push on 23-06-26
+Status: ✅ SCAN VERIFIED — container scan/SBOM approved for commit/push on 23-06-26
 Objective: make v1 deployable, observable, recoverable, documented, and release-ready.
 
 ## Context
@@ -80,7 +80,7 @@ Bantuin v1 can be operated and recovered—not merely demonstrated on one develo
 - [x] Complete hardening/release audit and receive approval
 - [ ] Add observability/redaction tests
 - [ ] Implement and prove backup/restore/upgrade
-- [ ] Run security/license/secret/container scans
+- [x] Run security/license/secret/container scans
 - [x] Run E2E, accessibility, load, and shutdown tests
 - [x] Finalize Docker/deployment/user/operator docs
 - [x] Prepare release candidate and evidence report

@@ -1,7 +1,7 @@
 # Sprint 06 — Hardening and Release Report
 
 Date: 23-06-26  
-Status: ✅ PATCH VERIFIED — approved for commit/push on 23-06-26
+Status: ✅ SCAN VERIFIED — container scan/SBOM approved for commit/push on 23-06-26
 
 ## Scope
 
@@ -20,13 +20,15 @@ docker run --rm -d --name bantuin-release-readiness-smoke -p 55437:4310 bantuin:
 bun -e "await new Promise(r=>setTimeout(r,1000)); for (const path of ['/ready','/health']) { const r=await fetch('http://127.0.0.1:55437'+path); console.log(path, r.status, await r.text()); }"
 docker stop bantuin-release-readiness-smoke
 bun run release:smoke
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --no-progress bantuin:release-readiness
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/work -w /work aquasec/trivy:latest image --format cyclonedx --output process/features/personal-ai-assistant/reports/SPRINT_06_CONTAINER_SBOM.cdx.json --no-progress bantuin:release-readiness
 ```
 
 Results:
 
 - `bun run check`: passed.
 - Tests: 39 passed, 0 failed, 196 assertions.
-- Secret scan: passed for 109 files.
+- Secret scan: passed for 111 files.
 - Builds: API, web, CLI, and Telegram passed.
 - `bun audit`: no vulnerabilities found.
 - `git diff --check`: passed.
@@ -38,6 +40,17 @@ Results:
   - Checks: E2E setup/session/status, static accessibility guard, backup/restore, and 40-request health/readiness load smoke.
   - Load result: 40 requests, 3 ms local duration in the latest run.
   - Note: authenticated SSE chat is covered by the integration suite; the release smoke intentionally avoids duplicating the SSE stream client because that made the smoke harness flaky under Bun child-process streaming.
+- Container vulnerability scan:
+  - Tool: Trivy `0.71.2` via Docker.
+  - Initial result: 2 HIGH OpenSSL findings in `libcrypto3` and `libssl3`, `CVE-2026-45447`, fixed version `3.5.7-r0`.
+  - Fix: runtime Docker image now runs `apk upgrade --no-cache libcrypto3 libssl3`.
+  - Final result: 0 HIGH/CRITICAL vulnerabilities.
+- Container SBOM:
+  - Artifact: `process/features/personal-ai-assistant/reports/SPRINT_06_CONTAINER_SBOM.cdx.json`.
+  - Format: CycloneDX 1.7.
+  - Components: 19.
+  - Final image ID: `sha256:47cb6ca97d333bdbd4c7dbb391ee7cb87360532c00088c68e838489783a7ba49`.
+  - Runtime inventory: Alpine `3.22.4`, Bun `1.3.14`, `libcrypto3/libssl3 3.5.7-r0`, app files `/app/index.js` and `/app/dist/web/index.html`.
 
 ## Release Blockers
 
@@ -51,7 +64,6 @@ Resolved in this patch:
 
 | Severity | Area | Finding | Required before v1 |
 | --- | --- | --- | --- |
-| Medium | Container scan/SBOM | Docker image builds and runs, but no dedicated image vulnerability scan or SBOM evidence exists. | Run a scanner if available, or document as a release risk/defer. |
 | Low | Logging | Logs are simple console lines, not structured correlation logs. Secret redaction exists for action output and tests, but general structured logging is not implemented. | Add only if needed for deployment; otherwise document local-first limit. |
 
 ## Security Audit Summary
@@ -70,6 +82,6 @@ No unresolved Critical or High exploitable code finding was found in this audit 
 
 ## Recommendation
 
-The user approved this release-readiness patch for commit/push on 23-06-26.
+The user approved the release-readiness, E2E/a11y/load, and container scan/SBOM patches for commit/push on 23-06-26.
 
 Stop again for explicit user approval before merge, tag, publish, live Telegram, or WhatsApp.
