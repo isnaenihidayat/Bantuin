@@ -2,7 +2,7 @@
 
 Date: 21-06-26  
 Complexity: Complex phase 6/6  
-Status: ⏳ PLANNED  
+Status: ✅ PATCH VERIFIED — release-readiness patch approved for commit/push on 23-06-26
 Objective: make v1 deployable, observable, recoverable, documented, and release-ready.
 
 ## Context
@@ -20,6 +20,8 @@ Completion requires integration, manual, DB/state, failure/recovery, security, a
 ## Pre-Sprint Research Gate
 
 Audit architecture drift, dependencies/licenses, auth/secrets, migrations, logs, performance budgets, backup/restore, deployment target, and release/rollback procedure; present findings and stop.
+
+Audit findings and the release-readiness patch are recorded in `process/features/personal-ai-assistant/reports/SPRINT_06_HARDENING_RELEASE_REPORT.md` on 23-06-26. No release, tag, merge, or live channel action is approved yet.
 
 ## Implementation Stages
 
@@ -75,14 +77,14 @@ Bantuin v1 can be operated and recovered—not merely demonstrated on one develo
 
 ## Implementation Checklist
 
-- [ ] Complete hardening/release audit and receive approval
+- [x] Complete hardening/release audit and receive approval
 - [ ] Add observability/redaction tests
 - [ ] Implement and prove backup/restore/upgrade
 - [ ] Run security/license/secret/container scans
 - [ ] Run E2E, accessibility, load, and shutdown tests
-- [ ] Finalize Docker/deployment/user/operator docs
-- [ ] Prepare release candidate and evidence report
-- [ ] Receive explicit user confirmation
+- [x] Finalize Docker/deployment/user/operator docs
+- [x] Prepare release candidate and evidence report
+- [x] Receive explicit user confirmation
 - [ ] Commit/push `feat/sprint-6-release`; open PR
 - [ ] Merge/tag/publish only under separate explicit approval
 
