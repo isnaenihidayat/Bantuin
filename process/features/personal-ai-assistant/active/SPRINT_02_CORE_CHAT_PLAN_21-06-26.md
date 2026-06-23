@@ -2,7 +2,7 @@
 
 Date: 21-06-26  
 Complexity: Complex phase 2/6  
-Status: ⏳ PLANNED  
+Status: ✅ VERIFIED — automated gates green and user approval received 22-06-26
 Objective: deliver owner setup, assistant profile, streamed web chat, and durable restart-safe history.
 
 ## Context
@@ -20,6 +20,8 @@ Completion requires integration, manual, DB/state, failure, and user-confirmatio
 ## Pre-Sprint Research Gate
 
 Inspect current contracts/migrations; verify browser auth and CSRF design; test provider streaming/cancellation semantics; define message durability states and retry behavior; present findings and stop.
+
+Research findings and the proposed implementation contract are recorded in `reports/SPRINT_02_CORE_CHAT_REPORT.md`. Implementation remains paused until approval.
 
 ## Implementation Stages
 
@@ -73,15 +75,15 @@ Bantuin's core loop is useful, durable, and secure enough to personalize.
 
 ## Implementation Checklist
 
-- [ ] Complete research gate and approval
-- [ ] Implement owner auth plus negative tests
-- [ ] Implement profile and prompt assembly tests
-- [ ] Implement durable sessions/messages and migration tests
-- [ ] Implement provider stream/cancel and SSE tests
-- [ ] Build setup/chat/history UI and accessibility checks
-- [ ] Run restart-safe E2E and DB verification
-- [ ] Receive user confirmation
-- [ ] Commit/push `feat/sprint-2-core-chat`
+- [x] Complete research gate and approval
+- [x] Implement owner auth plus negative tests
+- [x] Implement profile and prompt assembly tests
+- [x] Implement durable sessions/messages and migration tests
+- [x] Implement provider stream/cancel and SSE tests
+- [x] Build setup/chat/history UI and accessibility checks
+- [x] Run restart-safe E2E and DB verification
+- [x] Receive user confirmation
+- [x] Commit/push `feat/sprint-2-core-chat`
 
 ## Resume and Execution Handoff
 

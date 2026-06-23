@@ -23,6 +23,22 @@ function toOpenRouterMessage(message: ChatMessage) {
     };
   }
 
+  if (message.role === "user") {
+    return {
+      role: "user" as const,
+      content: message.images?.length
+        ? [
+            { type: "text" as const, text: message.content },
+            ...message.images.map((image) => ({
+              type: "image_url" as const,
+              imageUrl: { url: `data:${image.mediaType};base64,${image.data}` },
+            })),
+          ]
+        : message.content,
+      ...(message.name ? { name: message.name } : {}),
+    };
+  }
+
   return {
     role: message.role,
     content: message.content,
@@ -74,15 +90,38 @@ function providerError(error: unknown): AppError {
 export class OpenRouterProvider implements ModelProvider {
   readonly id = "openrouter";
   readonly #client: OpenRouter;
+  readonly #apiKey: string;
   readonly #model: string;
+  #contextWindow: Promise<number> | undefined;
 
   constructor(options: OpenRouterProviderOptions) {
     this.#model = options.model;
+    this.#apiKey = options.apiKey;
     this.#client = new OpenRouter({
       apiKey: options.apiKey,
       appTitle: options.appTitle,
       ...(options.httpReferer ? { httpReferer: options.httpReferer } : {}),
     });
+  }
+
+  contextWindowTokens(): Promise<number> {
+    this.#contextWindow ??= fetch(
+      `https://openrouter.ai/api/v1/model/${this.#model
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`,
+      {
+        headers: { authorization: `Bearer ${this.#apiKey}` },
+        signal: AbortSignal.timeout(3_000),
+      },
+    )
+      .then(async (response) => {
+        if (!response.ok) return 8_192;
+        const body = (await response.json()) as { data?: { context_length?: number } };
+        return body.data?.context_length ?? 8_192;
+      })
+      .catch(() => 8_192);
+    return this.#contextWindow;
   }
 
   async *streamChat(

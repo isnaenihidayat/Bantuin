@@ -22,4 +22,5 @@ test("AgentService delegates through the provider-neutral contract", async () =>
   }
 
   expect(eventTypes.at(-1)).toBe("message.completed");
+  expect(await service.contextWindowTokens()).toBe(8_192);
 });

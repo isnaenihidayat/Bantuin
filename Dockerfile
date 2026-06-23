@@ -20,8 +20,11 @@ ENV NODE_ENV=production \
 
 RUN addgroup -S bantuin && adduser -S bantuin -G bantuin && mkdir -p /data && chown bantuin:bantuin /data
 COPY --from=build --chown=bantuin:bantuin /app/dist/api/index.js ./index.js
+COPY --from=build --chown=bantuin:bantuin /app/dist/web ./dist/web
 
 USER bantuin
 EXPOSE 4310
 VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD bun -e "fetch('http://127.0.0.1:4310/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["bun", "run", "index.js"]

@@ -1,5 +1,10 @@
 import type { BantuinDatabase } from "./database";
 import initialMigration from "../migrations/0001_initial.sql";
+import coreChatMigration from "../migrations/0002_core_chat.sql";
+import memoryKnowledgeMigration from "../migrations/0003_memory_knowledge.sql";
+import assistantCapabilitiesMigration from "../migrations/0004_assistant_capabilities.sql";
+import safeActionsMigration from "../migrations/0005_safe_actions.sql";
+import channelsReleaseMigration from "../migrations/0006_channels_release.sql";
 
 type Migration = {
   version: number;
@@ -12,6 +17,31 @@ const migrations: Migration[] = [
     version: 1,
     name: "initial",
     sql: initialMigration,
+  },
+  {
+    version: 2,
+    name: "core_chat",
+    sql: coreChatMigration,
+  },
+  {
+    version: 3,
+    name: "memory_knowledge",
+    sql: memoryKnowledgeMigration,
+  },
+  {
+    version: 4,
+    name: "assistant_capabilities",
+    sql: assistantCapabilitiesMigration,
+  },
+  {
+    version: 5,
+    name: "safe_actions",
+    sql: safeActionsMigration,
+  },
+  {
+    version: 6,
+    name: "channels_release",
+    sql: channelsReleaseMigration,
   },
 ];
 

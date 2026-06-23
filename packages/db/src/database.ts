@@ -36,6 +36,7 @@ export function openDatabase(databaseUrl: string): BantuinDatabase {
     const database = new Database(path, { create: true, strict: true });
     database.exec("PRAGMA foreign_keys = ON;");
     database.exec("PRAGMA busy_timeout = 5000;");
+    database.exec("PRAGMA secure_delete = ON;");
     if (path !== ":memory:") {
       database.exec("PRAGMA journal_mode = WAL;");
     }
