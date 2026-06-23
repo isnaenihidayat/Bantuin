@@ -19,6 +19,7 @@ docker build -t bantuin:release-readiness .
 docker run --rm -d --name bantuin-release-readiness-smoke -p 55437:4310 bantuin:release-readiness
 bun -e "await new Promise(r=>setTimeout(r,1000)); for (const path of ['/ready','/health']) { const r=await fetch('http://127.0.0.1:55437'+path); console.log(path, r.status, await r.text()); }"
 docker stop bantuin-release-readiness-smoke
+bun run release:smoke
 ```
 
 Results:
@@ -33,6 +34,10 @@ Results:
 - Container smoke:
   - `/ready`: `200 ready`.
   - `/health`: `200`, API version `1.0.0-rc.1`.
+- `bun run release:smoke`: passed.
+  - Checks: E2E setup/session/status, static accessibility guard, backup/restore, and 40-request health/readiness load smoke.
+  - Load result: 40 requests, 3 ms local duration in the latest run.
+  - Note: authenticated SSE chat is covered by the integration suite; the release smoke intentionally avoids duplicating the SSE stream client because that made the smoke harness flaky under Bun child-process streaming.
 
 ## Release Blockers
 
@@ -46,7 +51,6 @@ Resolved in this patch:
 
 | Severity | Area | Finding | Required before v1 |
 | --- | --- | --- | --- |
-| Medium | E2E/a11y/load | No Playwright/browser, accessibility, or load budget evidence is recorded for v1. | Add minimal smoke checks or explicitly defer with user acceptance. |
 | Medium | Container scan/SBOM | Docker image builds and runs, but no dedicated image vulnerability scan or SBOM evidence exists. | Run a scanner if available, or document as a release risk/defer. |
 | Low | Logging | Logs are simple console lines, not structured correlation logs. Secret redaction exists for action output and tests, but general structured logging is not implemented. | Add only if needed for deployment; otherwise document local-first limit. |
 
