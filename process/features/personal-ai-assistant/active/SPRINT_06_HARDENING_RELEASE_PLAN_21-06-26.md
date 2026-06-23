@@ -78,8 +78,8 @@ Bantuin v1 can be operated and recovered—not merely demonstrated on one develo
 ## Implementation Checklist
 
 - [x] Complete hardening/release audit and receive approval
-- [ ] Add observability/redaction tests
-- [ ] Implement and prove backup/restore/upgrade
+- [x] Add observability/redaction tests
+- [x] Implement and prove backup/restore/upgrade
 - [x] Run security/license/secret/container scans
 - [x] Run E2E, accessibility, load, and shutdown tests
 - [x] Finalize Docker/deployment/user/operator docs

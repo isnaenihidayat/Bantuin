@@ -61,10 +61,13 @@ Resolved in this patch:
 - Runtime API version is now `1.0.0-rc.1`.
 - README contains the compact release/rollback runbook.
 - `THIRD_PARTY_NOTICES.md` now references TinyClaw commit `603d6cff6c06b9aeb5ad78a5cd71ec70795683aa` and states no substantial source copy.
+- Structured, redacted request/error logging added (`packages/core/src/logger.ts`), wired into `apps/api/src/app.ts` request and error-handling middleware. Every request emits a single JSON line with `requestId`, `method`, `path`, `status`, `durationMs`; failures additionally log `code`. Fields named like a secret (`token`, `password`, `secret`, `authorization`, `cookie`, `api-key`) are redacted defensively before serialization. Covered by `packages/core/src/logger.test.ts`.
+- `restoreDatabase` previously rejected any backup whose manifest `schemaVersion` did not exactly equal the running schema version, which meant a backup taken before a later migration shipped could never be restored. Fixed: `backupDatabase` now records the source database's actual applied schema version (was previously hardcoded to the latest), and `restoreDatabase` accepts any backup at or below the current schema version, running `migrateDatabase` after copy to bring it up to date; backups newer than the running code are still rejected. Covered by two new tests in `scripts/database-backup.test.ts` (upgrade-on-restore, and rejection of a future schema version).
 
-| Severity | Area | Finding | Required before v1 |
+| Severity | Area | Finding | Status |
 | --- | --- | --- | --- |
-| Low | Logging | Logs are simple console lines, not structured correlation logs. Secret redaction exists for action output and tests, but general structured logging is not implemented. | Add only if needed for deployment; otherwise document local-first limit. |
+| Low | Logging | Logs were simple console lines, not structured correlation logs. | Resolved — structured redacted request/error logging added. |
+| Medium | Backup/restore | Restoring a backup taken on an older schema version was rejected outright instead of upgrading it. | Resolved — restore now upgrades older backups in place. |
 
 ## Security Audit Summary
 
@@ -78,10 +81,20 @@ No unresolved Critical or High exploitable code finding was found in this audit 
 - Request body limits, login throttling, provider timeout, stream cancellation.
 - Secret scan and dependency audit pass.
 - Telegram credentials remain environment-only.
-- Backup restore validates checksum, schema, integrity, and refuses overwrite.
+- Backup restore validates checksum, schema, and integrity, refuses overwrite, and upgrades older schema versions via `migrateDatabase` instead of rejecting them.
+
+## Additional Automated Evidence (23-06-26, post-patch)
+
+```bash
+bun run check
+bun run release:smoke
+```
+
+- `bun run check`: passed — 43 tests (up from 39), format/lint/typecheck/boundaries/secrets/build all green.
+- `bun run release:smoke`: passed — `{"status":"ok","checks":["e2e","static-a11y","backup-restore","load-smoke"],"loadRequests":40}`.
 
 ## Recommendation
 
-The user approved the release-readiness, E2E/a11y/load, and container scan/SBOM patches for commit/push on 23-06-26.
+The user approved the release-readiness, E2E/a11y/load, and container scan/SBOM patches for commit/push on 23-06-26. Observability/redaction logging and the backup/restore schema-upgrade fix were completed and verified the same day.
 
 Stop again for explicit user approval before merge, tag, publish, live Telegram, or WhatsApp.
