@@ -1739,3 +1739,133 @@ export class McpMetadataRepository {
       .all(ownerId);
   }
 }
+
+export class ChannelRepository {
+  constructor(readonly database: BantuinDatabase) {}
+
+  claim(input: {
+    ownerId: string;
+    profileId: string;
+    channel: "telegram";
+    externalUserId: string;
+    externalMessageId: string;
+    sessionId: string;
+    now: string;
+  }): { sessionId: string; duplicate: boolean } {
+    return this.database
+      .transaction(() => {
+        const duplicate = this.database
+          .query<{ session_id: string }, [string, string, string]>(
+            `SELECT session_id FROM channel_inbound_messages
+             WHERE owner_id = ? AND channel = ? AND external_message_id = ?`,
+          )
+          .get(input.ownerId, input.channel, input.externalMessageId);
+        if (duplicate) return { sessionId: duplicate.session_id, duplicate: true };
+
+        const mapped = this.database
+          .query<{ session_id: string }, [string, string, string]>(
+            `SELECT session_id FROM channel_sessions
+             WHERE owner_id = ? AND channel = ? AND external_user_id = ?`,
+          )
+          .get(input.ownerId, input.channel, input.externalUserId);
+        const sessionId = mapped?.session_id ?? input.sessionId;
+
+        if (!mapped) {
+          this.database
+            .query(
+              `INSERT INTO chat_sessions(
+                 id, owner_id, profile_id, channel, title, parent_session_id, branch_message_id,
+                 created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+            )
+            .run(
+              sessionId,
+              input.ownerId,
+              input.profileId,
+              input.channel,
+              "Telegram",
+              input.now,
+              input.now,
+            );
+          this.database
+            .query(
+              `INSERT INTO channel_sessions(owner_id, channel, external_user_id, session_id, created_at)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .run(input.ownerId, input.channel, input.externalUserId, sessionId, input.now);
+        }
+
+        this.database
+          .query(
+            `INSERT INTO channel_inbound_messages(
+               owner_id, channel, external_message_id, session_id, created_at
+             ) VALUES (?, ?, ?, ?, ?)`,
+          )
+          .run(input.ownerId, input.channel, input.externalMessageId, sessionId, input.now);
+        return { sessionId, duplicate: false };
+      })
+      .immediate();
+  }
+}
+
+export type UsageRecord = {
+  requestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  reportedCost: number;
+  trackedSince: string | null;
+  updatedAt: string | null;
+};
+
+export class UsageRepository {
+  constructor(readonly database: BantuinDatabase) {}
+
+  record(
+    ownerId: string,
+    usage: { inputTokens: number; outputTokens: number; reportedCost?: number },
+    now: string,
+  ): void {
+    this.database
+      .query(
+        `INSERT INTO owner_usage(
+           owner_id, request_count, input_tokens, output_tokens, reported_cost, tracked_since, updated_at
+         ) VALUES (?, 1, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET
+           request_count = request_count + 1,
+           input_tokens = input_tokens + excluded.input_tokens,
+           output_tokens = output_tokens + excluded.output_tokens,
+           reported_cost = reported_cost + excluded.reported_cost,
+           updated_at = excluded.updated_at`,
+      )
+      .run(ownerId, usage.inputTokens, usage.outputTokens, usage.reportedCost ?? 0, now, now);
+  }
+
+  get(ownerId: string): UsageRecord {
+    const row = this.database
+      .query<
+        {
+          request_count: number;
+          input_tokens: number;
+          output_tokens: number;
+          reported_cost: number;
+          tracked_since: string;
+          updated_at: string;
+        },
+        [string]
+      >(
+        `SELECT request_count, input_tokens, output_tokens, reported_cost, tracked_since, updated_at
+         FROM owner_usage WHERE owner_id = ?`,
+      )
+      .get(ownerId);
+    return {
+      requestCount: row?.request_count ?? 0,
+      inputTokens: row?.input_tokens ?? 0,
+      outputTokens: row?.output_tokens ?? 0,
+      totalTokens: (row?.input_tokens ?? 0) + (row?.output_tokens ?? 0),
+      reportedCost: row?.reported_cost ?? 0,
+      trackedSince: row?.tracked_since ?? null,
+      updatedAt: row?.updated_at ?? null,
+    };
+  }
+}

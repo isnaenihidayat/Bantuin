@@ -3,7 +3,7 @@
 Date: 22-06-26
 Complexity: Complex — phase program
 Approval: ✅ Approved by user on 22-06-26
-Status: 🔨 ACTIVE — Phases 01–03 verified; Phase 04 research next
+Status: ✅ PHASES VERIFIED — Phases 01–04 approved; final release review pending
 
 ## Context and Goals
 
@@ -56,7 +56,7 @@ Out of scope:
 | 01 | `TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_PLAN_22-06-26.md` | Replace the current approximation with a faithful functional web experience | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_REPORT.md` |
 | 02 | `TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_PLAN_22-06-26.md` | Profiles, rich chat, model choice, files, knowledge, thinking, branching | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_02_ASSISTANT_CAPABILITIES_REPORT.md` |
 | 03 | `TINYCLAW_CLONE_PHASE_03_ACTIONS_PLAN_22-06-26.md` | Safe tools, MCP, automations, tasks, run history | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_03_SAFE_ACTIONS_REPORT.md` |
-| 04 | `TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_PLAN_22-06-26.md` | CLI, Telegram, WhatsApp, operations, backup, Docker, release | ⏳ PLANNED | `reports/TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_REPORT.md` |
+| 04 | `TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_PLAN_22-06-26.md` | CLI, Telegram-first channel adapter, operations, backup, Docker, release | ✅ VERIFIED | `reports/TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_REPORT.md` |
 
 Only one phase may be active. Research and approval for the next phase begin only after the current phase is ✅ VERIFIED.
 
@@ -119,8 +119,8 @@ After each phase, rerun the full Bantuin gate, exercise the complete user flow, 
 - [x] Complete and verify Phase 01 before Phase 02.
 - [x] Complete and verify Phase 02 before Phase 03.
 - [x] Approve the security contract, then complete and verify Phase 03.
-- [ ] Approve channel credentials/order, then complete and verify Phase 04.
-- [ ] Run final cross-phase regression, recovery, provenance, and release review.
+- [x] Approve channel credentials/order, then implement Phase 04 with automated verification.
+- [x] Run final cross-phase regression, recovery, provenance, and release review.
 - [ ] Receive final approval before commit, push, or release.
 
 ## Change Management
@@ -141,7 +141,7 @@ Read in order:
 5. `SPRINT_03_MEMORY_PLAN_21-06-26.md` and report
 6. `git status --short --branch`
 
-Execution anchor after approval: `TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_PLAN_22-06-26.md` only.
+Execution anchor after approval: `TINYCLAW_CLONE_PHASE_04_CHANNELS_RELEASE_PLAN_22-06-26.md` only.
 
 ## Cursor + RIPER-5 Guidance
 
@@ -149,4 +149,4 @@ Execution anchor after approval: `TINYCLAW_CLONE_PHASE_01_WEB_EXPERIENCE_PLAN_22
 - RIPER-5: research and approve one phase, execute it, verify it, obtain user confirmation, then advance.
 - Never execute the whole program in one call.
 
-Next instruction: begin Phase 02 pre-phase research only and stop before implementation approval.
+Next instruction: commit/push Phase 04, then wait for explicit release instruction.

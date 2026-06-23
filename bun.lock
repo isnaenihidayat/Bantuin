@@ -24,6 +24,20 @@
         "zod": "^4.1.13",
       },
     },
+    "apps/cli": {
+      "name": "@bantuin/cli",
+      "version": "0.1.0",
+      "dependencies": {
+        "@bantuin/client": "workspace:*",
+      },
+    },
+    "apps/telegram": {
+      "name": "@bantuin/telegram",
+      "version": "0.1.0",
+      "dependencies": {
+        "@bantuin/client": "workspace:*",
+      },
+    },
     "apps/web": {
       "name": "@bantuin/web",
       "version": "0.1.0",
@@ -85,6 +99,8 @@
 
     "@bantuin/api": ["@bantuin/api@workspace:apps/api"],
 
+    "@bantuin/cli": ["@bantuin/cli@workspace:apps/cli"],
+
     "@bantuin/client": ["@bantuin/client@workspace:packages/client"],
 
     "@bantuin/core": ["@bantuin/core@workspace:packages/core"],
@@ -92,6 +108,8 @@
     "@bantuin/db": ["@bantuin/db@workspace:packages/db"],
 
     "@bantuin/providers": ["@bantuin/providers@workspace:packages/providers"],
+
+    "@bantuin/telegram": ["@bantuin/telegram@workspace:apps/telegram"],
 
     "@bantuin/web": ["@bantuin/web@workspace:apps/web"],
 

@@ -10,6 +10,7 @@ import {
   ActionRepository,
   AutomationRepository,
   buildFtsQuery,
+  ChannelRepository,
   chunkKnowledgeText,
   KnowledgeRepository,
   MemoryRepository,
@@ -18,20 +19,21 @@ import {
   ProfileRepository,
   SessionRepository,
   TaskRepository,
+  UsageRepository,
 } from "./repositories";
 
 describe("database foundation", () => {
   test("applies migrations once and remains healthy", () => {
     const database = openDatabase("file::memory:");
     try {
-      expect(migrateDatabase(database)).toEqual([1, 2, 3, 4, 5]);
+      expect(migrateDatabase(database)).toEqual([1, 2, 3, 4, 5, 6]);
       expect(migrateDatabase(database)).toEqual([]);
       expect(checkDatabase(database)).toBe(true);
       expect(
         database
           .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM schema_migrations")
           .get()?.count,
-      ).toBe(5);
+      ).toBe(6);
       expect(database.query<{ secure_delete: number }, []>("PRAGMA secure_delete").get()).toEqual({
         secure_delete: 1,
       });
@@ -450,6 +452,64 @@ describe("database foundation", () => {
       expect(() =>
         database.query("DELETE FROM action_events WHERE proposal_id = ?").run(actionId),
       ).toThrow("action events are append-only");
+    } finally {
+      database.close();
+    }
+  });
+
+  test("deduplicates channel ingress and aggregates provider-reported usage", () => {
+    const database = openDatabase("file::memory:");
+    migrateDatabase(database);
+    const now = new Date().toISOString();
+    const ownerId = createId("owner");
+    const profileId = createId("profile");
+    try {
+      new OwnerRepository(database).create({
+        id: ownerId,
+        email: "channel@example.test",
+        createdAt: now,
+      });
+      new ProfileRepository(database).create({
+        id: profileId,
+        ownerId,
+        name: "Bantuin",
+        systemPrompt: "",
+        providerModel: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const channels = new ChannelRepository(database);
+      const first = channels.claim({
+        ownerId,
+        profileId,
+        channel: "telegram",
+        externalUserId: "42",
+        externalMessageId: "42:7",
+        sessionId: createId("session"),
+        now,
+      });
+      const duplicate = channels.claim({
+        ownerId,
+        profileId,
+        channel: "telegram",
+        externalUserId: "42",
+        externalMessageId: "42:7",
+        sessionId: createId("session"),
+        now,
+      });
+      expect(first.duplicate).toBe(false);
+      expect(duplicate).toEqual({ sessionId: first.sessionId, duplicate: true });
+
+      const usage = new UsageRepository(database);
+      usage.record(ownerId, { inputTokens: 10, outputTokens: 4, reportedCost: 0.01 }, now);
+      usage.record(ownerId, { inputTokens: 3, outputTokens: 2 }, now);
+      expect(usage.get(ownerId)).toMatchObject({
+        requestCount: 2,
+        inputTokens: 13,
+        outputTokens: 6,
+        totalTokens: 19,
+        reportedCost: 0.01,
+      });
     } finally {
       database.close();
     }

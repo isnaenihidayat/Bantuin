@@ -12,6 +12,7 @@ import {
   ActionRepository,
   type AutomationRecord,
   AttachmentRepository,
+  ChannelRepository,
   McpMetadataRepository,
   chunkKnowledgeText,
   checkDatabase,
@@ -25,6 +26,7 @@ import {
   ProfileRepository,
   SessionRepository,
   type TaskRecord,
+  UsageRepository,
 } from "@bantuin/db";
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { Context } from "hono";
@@ -114,6 +116,8 @@ export function createApp(dependencies: AppDependencies) {
   const memories = new MemoryRepository(dependencies.database);
   const knowledge = new KnowledgeRepository(dependencies.database);
   const attachments = new AttachmentRepository(dependencies.database);
+  const channels = new ChannelRepository(dependencies.database);
+  const usage = new UsageRepository(dependencies.database);
   const safeActions =
     dependencies.safeActions ?? new SafeActionService(dependencies.database, dependencies.agent);
   const actions = new ActionRepository(dependencies.database);
@@ -313,6 +317,18 @@ export function createApp(dependencies: AppDependencies) {
           )) {
             if (event.type === "message.delta") {
               messageRepository.appendDelta(assistant.id, event.delta, new Date().toISOString());
+            } else if (event.type === "message.usage") {
+              usage.record(
+                owner.id,
+                {
+                  inputTokens: event.usage.inputTokens,
+                  outputTokens: event.usage.outputTokens,
+                  ...(event.usage.estimatedCost !== undefined
+                    ? { reportedCost: event.usage.estimatedCost }
+                    : {}),
+                },
+                new Date().toISOString(),
+              );
             } else if (event.type === "message.error") {
               messageRepository.finish(assistant.id, "failed", new Date().toISOString(), {
                 errorCode: event.code,
@@ -657,6 +673,41 @@ export function createApp(dependencies: AppDependencies) {
         ? dependencies.config.provider.model
         : "mock";
     return context.json({ models: [{ id: model, name: model.split("/").at(-1) ?? model }] });
+  });
+
+  app.get("/v1/system/status", (context) => {
+    const owner = currentOwner(context);
+    return context.json({
+      apiVersion: BANTUIN_API_VERSION,
+      database: checkDatabase(dependencies.database) ? "ok" : "error",
+      provider: dependencies.config.provider.kind,
+      usage: usage.get(owner.id),
+      checkedAt: new Date().toISOString(),
+    });
+  });
+
+  app.post("/v1/channels/telegram/claims", async (context) => {
+    const owner = currentOwner(context);
+    const profile = profiles.findByOwnerId(owner.id);
+    if (!profile) {
+      throw new AppError({ code: "VALIDATION_FAILED", message: "Profile not found", status: 404 });
+    }
+    const input = z
+      .object({
+        externalUserId: z.string().trim().min(1).max(100),
+        externalMessageId: z.string().trim().min(1).max(180),
+      })
+      .parse(await context.req.json());
+    const claim = channels.claim({
+      ownerId: owner.id,
+      profileId: profile.id,
+      channel: "telegram",
+      externalUserId: input.externalUserId,
+      externalMessageId: input.externalMessageId,
+      sessionId: createId("session"),
+      now: new Date().toISOString(),
+    });
+    return context.json(claim, claim.duplicate ? 200 : 201);
   });
 
   const taskStatuses = ["backlog", "todo", "in_progress", "done", "failed"] as const;
@@ -1209,6 +1260,7 @@ export function createApp(dependencies: AppDependencies) {
       })),
       actions: actions.list(owner.id),
       mcpServers: mcpMetadata.list(owner.id),
+      usage: usage.get(owner.id),
       sessions: exportedSessions,
     });
   });
@@ -1224,6 +1276,7 @@ export function createApp(dependencies: AppDependencies) {
       .object({
         title: z.string().trim().min(1).max(120).nullable().default(null),
         profileId: z.string().optional(),
+        channel: z.enum(["web", "cli"]).default("web"),
       })
       .parse(await context.req.json());
     const profile = input.profileId
@@ -1237,7 +1290,7 @@ export function createApp(dependencies: AppDependencies) {
       id: createId("session"),
       ownerId: owner.id,
       profileId: profile.id,
-      channel: "web",
+      channel: input.channel,
       title: input.title,
       parentSessionId: null,
       branchMessageId: null,
@@ -1508,6 +1561,10 @@ export function createApp(dependencies: AppDependencies) {
         delete: operation("Archive an assistant profile", "204"),
       },
       "/v1/models": { get: operation("List configured provider models") },
+      "/v1/system/status": { get: operation("Read runtime status and aggregate usage") },
+      "/v1/channels/telegram/claims": {
+        post: operation("Claim one Telegram inbound message durably", "201"),
+      },
       "/v1/tasks": {
         get: operation("List durable tasks"),
         post: operation("Create a durable task", "201"),

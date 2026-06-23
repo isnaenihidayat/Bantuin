@@ -101,6 +101,8 @@ describe("foundation API", () => {
     expect(document.paths).toHaveProperty("/v1/setup");
     expect(document.paths).toHaveProperty("/v1/sessions/{id}/messages");
     expect(document.paths).toHaveProperty("/v1/messages/{id}/cancel");
+    expect(document.paths).toHaveProperty("/v1/system/status");
+    expect(document.paths).toHaveProperty("/v1/channels/telegram/claims");
   });
 
   test("streams the deterministic provider vertical slice", async () => {
@@ -343,6 +345,45 @@ describe("core chat authentication", () => {
       { sequence: 1, role: "user", status: "completed", content: "Halo" },
       { sequence: 2, role: "assistant", status: "completed", content: "Bantuin mock: Halo" },
     ]);
+  });
+
+  test("claims Telegram ingress durably and reports provider usage", async () => {
+    const app = testApp();
+    const setup = await app.request("/v1/setup", {
+      method: "POST",
+      headers: mutationHeaders,
+      body: JSON.stringify({
+        email: "telegram@example.test",
+        password: "correct horse battery staple",
+      }),
+    });
+    const cookie = setup.headers.get("set-cookie")?.split(";", 1)[0] ?? "";
+    const headers = { ...mutationHeaders, cookie };
+    const claim = () =>
+      app.request("/v1/channels/telegram/claims", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ externalUserId: "42", externalMessageId: "99:7" }),
+      });
+    const first = await claim();
+    const firstBody = (await first.json()) as { sessionId: string; duplicate: boolean };
+    const duplicate = await claim();
+    expect(first.status).toBe(201);
+    expect(firstBody.duplicate).toBe(false);
+    expect(await duplicate.json()).toEqual({ sessionId: firstBody.sessionId, duplicate: true });
+
+    const response = await app.request(`/v1/sessions/${firstBody.sessionId}/messages`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ message: "Halo", clientRequestId: "telegram:99:7" }),
+    });
+    expect(await response.text()).toContain("message.usage");
+    const status = await app.request("/v1/system/status", { headers: { cookie } });
+    expect(await status.json()).toMatchObject({
+      database: "ok",
+      provider: "mock",
+      usage: { requestCount: 1, inputTokens: expect.any(Number), outputTokens: expect.any(Number) },
+    });
   });
 
   test("cancels a stream and explicitly retries without duplicating the user message", async () => {
